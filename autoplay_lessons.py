@@ -1197,7 +1197,16 @@ async def collect_course_plan(
 
         if not await expand_chapter(context, page, config.selectors, chapter_number, config, logger):
             continue
-        await page.wait_for_timeout(200)
+
+        wait_seconds = max(config.lesson_render_wait, 0.0)
+        if wait_seconds:
+            logger.info(
+                "  Chapter %s opened for planning; waiting %.1fs for lesson rendering",
+                chapter_number,
+                wait_seconds,
+            )
+            await page.wait_for_timeout(int(wait_seconds * 1000))
+
         rows = await collect_lesson_rows(
             context,
             page,
@@ -1700,6 +1709,17 @@ async def run(config: Config) -> RuntimeStats:
     logger = logging.getLogger(__name__)
     stats = RuntimeStats()
     state = LessonState.load(config.state_file)
+
+    if config.start_chapter is not None:
+        previous_chapter = state.chapter
+        if previous_chapter != config.start_chapter or state.lesson_title is not None:
+            logger.info(
+                "Configured start chapter %s overrides resume state (previous %s)",
+                config.start_chapter,
+                previous_chapter if previous_chapter is not None else "none",
+            )
+        state.chapter = config.start_chapter
+        state.lesson_title = None
 
     async with async_playwright() as playwright:
         launch_args = ["--start-maximized"]
