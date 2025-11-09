@@ -33,6 +33,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "headless": False,
     "start_chapter": None,
     "end_chapter": None,
+    "lesson_render_wait": 5.5,
     "whitelist": (),
     "blacklist": (),
     "log_file": None,
@@ -73,6 +74,12 @@ FrameLike = Union[Page, Frame]
 _SCROLL_CONTAINER_CACHE: Dict[int, ElementHandle] = {}
 
 
+TITLE_EXCLUSION_KEYWORDS: Tuple[Tuple[str, str], ...] = (
+    ("test di fine lezione", "title contains 'Test di fine lezione'"),
+    ("dispensa", "title contains 'Dispensa'"),
+)
+
+
 @dataclass
 class ChapterPlanEntry:
     """Summary information for a chapter used during planning."""
@@ -80,6 +87,21 @@ class ChapterPlanEntry:
     chapter: int
     lessons: int
     seconds: int
+
+
+@dataclass
+class LessonCandidate:
+    """Describe a lesson row located inside an opened chapter."""
+
+    row: Locator
+    title: str
+    title_locator: Locator
+    duration_seconds: Optional[int]
+    progress_value: Optional[int]
+    progress_label: str
+    completed: bool
+    skip_reason: Optional[str]
+    bounding_box: Optional[Dict[str, float]]
 
 
 @dataclass
@@ -143,6 +165,7 @@ class Config:
     headless: bool
     start_chapter: Optional[int]
     end_chapter: Optional[int]
+    lesson_render_wait: float
     whitelist: Sequence[re.Pattern[str]]
     blacklist: Sequence[re.Pattern[str]]
     log_file: Optional[Path]
@@ -182,6 +205,12 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> Config:
     parser.add_argument("--headless", action="store_true", help="Run browser in headless mode")
     parser.add_argument("--start-chapter", type=int, help="Chapter number to start from (inclusive)")
     parser.add_argument("--end-chapter", type=int, help="Chapter number to stop at (inclusive)")
+    parser.add_argument(
+        "--lesson-render-wait",
+        type=float,
+        default=DEFAULT_CONFIG["lesson_render_wait"],
+        help="Seconds to wait after opening a chapter before scanning lessons",
+    )
     parser.add_argument("--whitelist", action="append", default=None, help="Regex for lesson titles to include (can be repeated)")
     parser.add_argument("--blacklist", action="append", default=None, help="Regex for lesson titles to skip (can be repeated)")
     parser.add_argument("--log-file", type=Path, help="Optional log file path")
@@ -225,6 +254,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> Config:
         headless=args.headless,
         start_chapter=args.start_chapter,
         end_chapter=args.end_chapter,
+        lesson_render_wait=args.lesson_render_wait,
         whitelist=whitelist,
         blacklist=blacklist,
         log_file=args.log_file,
@@ -273,6 +303,7 @@ def summarise_config(config: Config) -> str:
         f"  URL: {config.url}\n"
         f"  Headless: {config.headless}\n"
         f"  Wait after play: {config.after_play}s (buffer {config.buffer}s, max {config.max_wait}s)\n"
+        f"  Chapter render wait: {config.lesson_render_wait}s\n"
         f"  Chapter range: {config.start_chapter or '-'} -> {config.end_chapter or '-'}\n"
         f"  Whitelist: {whitelist}\n"
         f"  Blacklist: {blacklist}\n"
@@ -574,6 +605,14 @@ def extract_chapter_number(text: str) -> Optional[int]:
 
 def matches_patterns(patterns: Sequence[re.Pattern[str]], title: str) -> bool:
     return any(pattern.search(title) for pattern in patterns)
+
+
+def detect_title_exclusion_reason(title: str) -> Optional[str]:
+    lowered = title.lower()
+    for keyword, reason in TITLE_EXCLUSION_KEYWORDS:
+        if keyword in lowered:
+            return reason
+    return None
 
 
 async def ensure_visible(locator: Locator) -> None:
@@ -900,11 +939,16 @@ async def collect_lesson_rows(
     selectors: Dict[str, str],
     logger: logging.Logger,
     config: Config,
+    *,
+    bounds: Optional[Tuple[float, Optional[float]]] = None,
+    chapter_number: Optional[int] = None,
 ) -> List[Locator]:
     seen_positions: set = set()
     collected: List[Locator] = []
     max_cycles = 6
     previous_total = 0
+    scroll_attempts = 0
+    last_anchor_bbox: Optional[Dict[str, float]] = None
 
     async def gather_once() -> tuple[List[Locator], Optional[Locator]]:
         title_nodes = context.locator(selectors["lesson_title"])
@@ -961,6 +1005,14 @@ async def collect_lesson_rows(
                 bounding_box = await row.bounding_box()
             except PlaywrightError:
                 bounding_box = None
+
+            if bounds and bounding_box is not None:
+                min_y, max_y = bounds
+                if bounding_box["y"] < min_y - 2:
+                    continue
+                if max_y is not None and bounding_box["y"] >= max_y - 2:
+                    continue
+
             key = (
                 round(bounding_box["x"]) if bounding_box else 0,
                 round(bounding_box["y"]) if bounding_box else index,
@@ -974,6 +1026,11 @@ async def collect_lesson_rows(
 
     for cycle in range(1, max_cycles + 1):
         new_rows, anchor = await gather_once()
+        if anchor is not None:
+            try:
+                last_anchor_bbox = await anchor.bounding_box()
+            except PlaywrightError:
+                last_anchor_bbox = None
         if new_rows:
             collected.extend(new_rows)
         if len(collected) == previous_total:
@@ -1006,9 +1063,19 @@ async def collect_lesson_rows(
             step=600,
             anchor=anchor,
         )
+        scroll_attempts += 2
 
     if not collected:
-        logger.warning("Unable to detect lessons after %s cycles", max_cycles)
+        scope_label = (
+            f"chapter {chapter_number}" if chapter_number is not None else "current chapter"
+        )
+        logger.warning(
+            "Unable to detect lessons after %s cycles (%s scroll attempts) in %s; last anchor=%s",
+            max_cycles,
+            scroll_attempts,
+            scope_label,
+            format_bounding_box(last_anchor_bbox),
+        )
 
     return collected
 
@@ -1023,6 +1090,49 @@ async def read_lesson_title(row: Locator, config: Config, timeout_ms: float) -> 
         title = (await row.inner_text(timeout=timeout_ms)).strip().splitlines()[0]
         title_locator = row
     return title, title_locator
+
+
+async def inspect_lesson_row(
+    row: Locator,
+    config: Config,
+    *,
+    timeout_ms: float,
+) -> LessonCandidate:
+    title, title_locator = await read_lesson_title(row, config, timeout_ms)
+    try:
+        raw_text = await row.inner_text(timeout=timeout_ms)
+    except PlaywrightError:
+        raw_text = title
+
+    duration_seconds = parse_duration(raw_text)
+    progress_value, completed = await evaluate_progress(row, config.progress_threshold, raw_text)
+    progress_label = f"{progress_value}%" if progress_value is not None else "?%"
+
+    try:
+        bounding_box = await row.bounding_box()
+    except PlaywrightError:
+        bounding_box = None
+
+    skip_reason = detect_title_exclusion_reason(title)
+    if skip_reason is None and progress_value == 100:
+        skip_reason = "progress 100%"
+    if skip_reason is None and completed:
+        threshold_label = config.progress_threshold
+        skip_reason = f"progress {progress_label} >= threshold {threshold_label}%"
+    if skip_reason is None and duration_seconds is None:
+        skip_reason = "duration not found"
+
+    return LessonCandidate(
+        row=row,
+        title=title,
+        title_locator=title_locator,
+        duration_seconds=duration_seconds,
+        progress_value=progress_value,
+        progress_label=progress_label,
+        completed=completed,
+        skip_reason=skip_reason,
+        bounding_box=bounding_box,
+    )
 
 
 async def collect_course_plan(
@@ -1053,6 +1163,16 @@ async def collect_course_plan(
             bbox = await header.bounding_box()
         except PlaywrightError:
             bbox = None
+        next_header = chapter_locators.nth(index + 1) if index + 1 < count else None
+        try:
+            next_bbox = await next_header.bounding_box() if next_header else None
+        except PlaywrightError:
+            next_bbox = None
+        bounds: Optional[Tuple[float, Optional[float]]] = None
+        if bbox:
+            min_y = bbox["y"] + bbox.get("height", 0)
+            max_y = next_bbox["y"] if next_bbox else None
+            bounds = (min_y, max_y)
         header_label = normalise_text_spacing(text)
         logger.info(
             "Chapter header %s/%s -> #%s '%s' bbox=%s",
@@ -1077,50 +1197,56 @@ async def collect_course_plan(
 
         if not await expand_chapter(context, page, config.selectors, chapter_number, config, logger):
             continue
-        await page.wait_for_timeout(200)
-        rows = await collect_lesson_rows(context, page, config.selectors, logger, config)
+
+        wait_seconds = max(config.lesson_render_wait, 0.0)
+        if wait_seconds:
+            logger.info(
+                "  Chapter %s opened for planning; waiting %.1fs for lesson rendering",
+                chapter_number,
+                wait_seconds,
+            )
+            await page.wait_for_timeout(int(wait_seconds * 1000))
+
+        rows = await collect_lesson_rows(
+            context,
+            page,
+            config.selectors,
+            logger,
+            config,
+            bounds=bounds,
+            chapter_number=chapter_number,
+        )
         chapter_lessons = 0
         chapter_seconds = 0
         total_rows = 0
         for row in rows:
             total_rows += 1
             timeout_ms = config.page_timeout * 1000
-            title, _ = await read_lesson_title(row, config, timeout_ms)
-            try:
-                raw_text = await row.inner_text(timeout=timeout_ms)
-            except PlaywrightError:
-                raw_text = ""
-            duration_seconds = parse_duration(raw_text)
-            progress_value, completed = await evaluate_progress(
-                row, config.progress_threshold, raw_text
-            )
-            try:
-                bbox = await row.bounding_box()
-            except PlaywrightError:
-                bbox = None
-
+            candidate = await inspect_lesson_row(row, config, timeout_ms=timeout_ms)
+            duration_seconds = candidate.duration_seconds
             duration_label = (
                 f"{duration_seconds}s" if duration_seconds is not None else "?s"
             )
-            progress_label = (
-                f"{progress_value}%" if progress_value is not None else "?%"
-            )
             base_message = (
-                f"    Lesson {chapter_number}.{total_rows} -> '{title}' "
-                f"duration={duration_label} progress={progress_label} "
-                f"bbox={format_bounding_box(bbox)}"
+                f"    Lesson {chapter_number}.{total_rows} -> '{candidate.title}' "
+                f"duration={duration_label} progress={candidate.progress_label} "
+                f"bbox={format_bounding_box(candidate.bounding_box)}"
             )
 
-            if config.whitelist and not matches_patterns(config.whitelist, title):
+            if candidate.skip_reason:
+                logger.info("%s -> SKIP (%s)", base_message, candidate.skip_reason)
+                continue
+
+            if config.whitelist and not matches_patterns(config.whitelist, candidate.title):
                 logger.info("%s -> SKIP (not in whitelist)", base_message)
                 continue
-            if config.blacklist and matches_patterns(config.blacklist, title):
+            if config.blacklist and matches_patterns(config.blacklist, candidate.title):
                 logger.info("%s -> SKIP (matches blacklist)", base_message)
                 continue
 
             resume_marker = False
             if plan_state.chapter == chapter_number and plan_state.lesson_title:
-                if plan_state.lesson_title == title:
+                if plan_state.lesson_title == candidate.title:
                     resume_marker = True
                     plan_state.chapter = None
                     plan_state.lesson_title = None
@@ -1131,15 +1257,6 @@ async def collect_course_plan(
                         plan_state.lesson_title,
                     )
                     continue
-
-            if completed:
-                logger.info(
-                    "%s -> SKIP (progress %s%% >= threshold %s%%)",
-                    base_message,
-                    progress_value if progress_value is not None else "?",
-                    config.progress_threshold,
-                )
-                continue
 
             if duration_seconds is None:
                 logger.info("%s -> SKIP (duration not found)", base_message)
@@ -1272,7 +1389,7 @@ async def maybe_prompt_for_chapter_range(
 
 async def play_lesson(
     page: Page,
-    row: Locator,
+    candidate: LessonCandidate,
     index: int,
     total: int,
     config: Config,
@@ -1282,8 +1399,8 @@ async def play_lesson(
 ) -> None:
     stats.next_lesson()
 
-    timeout_ms = config.page_timeout * 1000
-    title, title_locator = await read_lesson_title(row, config, timeout_ms)
+    title = candidate.title
+    title_locator = candidate.title_locator
 
     if config.whitelist and not matches_patterns(config.whitelist, title):
         logger.info("Skipping %s (not in whitelist)", title)
@@ -1304,30 +1421,19 @@ async def play_lesson(
             stats.skipped += 1
             return
 
-    try:
-        raw_text = await row.inner_text(timeout=timeout_ms)
-    except PlaywrightError:
-        raw_text = title
-    duration_seconds = parse_duration(raw_text)
+    if candidate.skip_reason:
+        logger.info("Skipping %s (%s)", title, candidate.skip_reason)
+        stats.skipped += 1
+        return
+
+    duration_seconds = candidate.duration_seconds
     if duration_seconds is None:
         logger.warning("Skipping %s: duration not found", title)
         stats.skipped += 1
         return
 
-    progress_value, completed = await evaluate_progress(
-        row, config.progress_threshold, raw_text
-    )
-    if completed:
-        logger.info(
-            "Skipping %s (progress %s%% >= threshold %s%%)",
-            title,
-            progress_value if progress_value is not None else "?",
-            config.progress_threshold,
-        )
-        stats.skipped += 1
-        return
-
-    progress_label = f"{progress_value}%" if progress_value is not None else "?%"
+    progress_value = candidate.progress_value
+    progress_label = candidate.progress_label
     logger.info(
         "[%s/%s] Playing '%s' (%ss, progress=%s, threshold=%s%%)",
         index,
@@ -1338,9 +1444,16 @@ async def play_lesson(
         config.progress_threshold,
     )
 
+    bbox_label = format_bounding_box(candidate.bounding_box)
+    logger.info("Target lesson row bbox=%s", bbox_label)
+
     async def click_action() -> None:
-        await ensure_visible(title_locator)
-        await title_locator.click(timeout=config.click_timeout * 1000)
+        await ensure_visible(candidate.row)
+        try:
+            await candidate.row.click(timeout=config.click_timeout * 1000)
+        except PlaywrightError:
+            await ensure_visible(title_locator)
+            await title_locator.click(timeout=config.click_timeout * 1000)
 
     def on_failure(attempt: int, exc: Exception) -> None:
         logger.warning(
@@ -1352,7 +1465,7 @@ async def play_lesson(
         )
         asyncio.create_task(page.mouse.wheel(0, 400))
 
-    logger.info("Clicking lesson using locator %s", title_locator)
+    logger.info("Clicking lesson row locator %s (title locator %s)", candidate.row, title_locator)
 
     clicked = await exponential_retry(
         click_action,
@@ -1376,7 +1489,14 @@ async def play_lesson(
     remaining = max(0, duration_seconds - config.after_play) + config.buffer
     remaining = min(remaining, config.max_wait)
     if remaining:
-        logger.info("Waiting %ss for remaining duration", remaining)
+        logger.info(
+            "Waiting %ss for remaining duration (duration=%ss, after_play=%ss, buffer=%ss, max=%ss)",
+            remaining,
+            duration_seconds,
+            config.after_play,
+            config.buffer,
+            config.max_wait,
+        )
         await page.wait_for_timeout(remaining * 1000)
 
     logger.info("Completed '%s'", title)
@@ -1394,6 +1514,12 @@ async def process_chapter(
     logger: logging.Logger,
     stats: RuntimeStats,
     state: LessonState,
+    *,
+    chapter_index: int,
+    total_chapters: int,
+    header: Locator,
+    header_label: str,
+    next_header: Optional[Locator],
 ) -> bool:
     if not config.chapter_in_scope(chapter_number):
         logger.info("Chapter %s outside configured range; skipping", chapter_number)
@@ -1406,6 +1532,18 @@ async def process_chapter(
 
     stats.new_chapter(chapter_number)
 
+    wait_ms = max(int(config.lesson_render_wait * 1000), 0)
+    logger.info(
+        "Chapter %s header %s/%s '%s' opened; waiting %.1fs for lesson rendering",
+        chapter_number,
+        chapter_index,
+        total_chapters,
+        header_label,
+        config.lesson_render_wait,
+    )
+    if wait_ms:
+        await page.wait_for_timeout(wait_ms)
+
     try:
         await context.wait_for_selector(
             config.selectors["lesson_title"],
@@ -1414,17 +1552,101 @@ async def process_chapter(
     except PlaywrightTimeout:
         logger.warning("Lesson titles did not appear in time for chapter %s", chapter_number)
 
-    await page.wait_for_timeout(500)
-    lessons = await collect_lesson_rows(context, page, config.selectors, logger, config)
+    try:
+        header_bbox = await header.bounding_box()
+    except PlaywrightError:
+        header_bbox = None
+    try:
+        next_bbox = await next_header.bounding_box() if next_header else None
+    except PlaywrightError:
+        next_bbox = None
+
+    bounds: Optional[Tuple[float, Optional[float]]] = None
+    if header_bbox:
+        min_y = header_bbox["y"] + header_bbox.get("height", 0)
+        max_y = next_bbox["y"] if next_bbox else None
+        bounds = (min_y, max_y)
+
+    logger.info(
+        "Chapter header %s/%s -> #%s '%s' bbox=%s (next=%s)",
+        chapter_index,
+        total_chapters,
+        chapter_number,
+        header_label,
+        format_bounding_box(header_bbox),
+        format_bounding_box(next_bbox),
+    )
+
+    lessons = await collect_lesson_rows(
+        context,
+        page,
+        config.selectors,
+        logger,
+        config,
+        bounds=bounds,
+        chapter_number=chapter_number,
+    )
     if not lessons:
         logger.warning("No lessons in chapter %s", chapter_number)
         return True
 
-    for index, row in enumerate(lessons, start=1):
+    lesson_candidates: List[LessonCandidate] = []
+    total_rows = 0
+    skipped_rows = 0
+    queued_seconds = 0
+    timeout_ms = config.page_timeout * 1000
+    for row in lessons:
+        total_rows += 1
+        candidate = await inspect_lesson_row(row, config, timeout_ms=timeout_ms)
+        duration_seconds = candidate.duration_seconds
+        duration_label = (
+            f"{duration_seconds}s" if duration_seconds is not None else "?s"
+        )
+        base_message = (
+            f"    Lesson {chapter_number}.{total_rows} -> '{candidate.title}' "
+            f"duration={duration_label} progress={candidate.progress_label} "
+            f"bbox={format_bounding_box(candidate.bounding_box)}"
+        )
+
+        if candidate.skip_reason:
+            logger.info("%s -> SKIP (%s)", base_message, candidate.skip_reason)
+            stats.skipped += 1
+            skipped_rows += 1
+            continue
+
+        logger.info("%s -> READY", base_message)
+        lesson_candidates.append(candidate)
+        if duration_seconds:
+            queued_seconds += duration_seconds
+
+    if not lesson_candidates:
+        logger.warning(
+            "All lessons skipped in chapter %s (detected %s rows, skipped %s)",
+            chapter_number,
+            total_rows,
+            skipped_rows,
+        )
+        return True
+
+    logger.info(
+        "Chapter %s summary: detected %s lessons, queued %s (~%s)",
+        chapter_number,
+        total_rows,
+        len(lesson_candidates),
+        format_seconds(queued_seconds) if queued_seconds else "0s",
+    )
+
+    for index, candidate in enumerate(lesson_candidates, start=1):
         try:
-            await play_lesson(page, row, index, len(lessons), config, logger, stats, state)
+            await play_lesson(page, candidate, index, len(lesson_candidates), config, logger, stats, state)
         except Exception as exc:  # pragma: no cover - resilient automation
-            logger.exception("Unexpected error on lesson %s/%s in chapter %s: %s", index, len(lessons), chapter_number, exc)
+            logger.exception(
+                "Unexpected error on lesson %s/%s in chapter %s: %s",
+                index,
+                len(lesson_candidates),
+                chapter_number,
+                exc,
+            )
             await take_error_screenshot(page, prefix=f"exception_{chapter_number}_{index}")
             stats.errors += 1
     return True
@@ -1461,7 +1683,23 @@ async def iterate_chapters(
             logger.info("Skipping chapter %s (before resume state)", chapter_number)
             continue
 
-        if not await process_chapter(page, context, chapter_number, config, logger, stats, state):
+        header_label = normalise_text_spacing(text)
+        next_header = chapter_locators.nth(index + 1) if index + 1 < count else None
+
+        if not await process_chapter(
+            page,
+            context,
+            chapter_number,
+            config,
+            logger,
+            stats,
+            state,
+            chapter_index=index + 1,
+            total_chapters=count,
+            header=header,
+            header_label=header_label,
+            next_header=next_header,
+        ):
             break
 
     logger.info("Finished iterating chapters")
@@ -1471,6 +1709,17 @@ async def run(config: Config) -> RuntimeStats:
     logger = logging.getLogger(__name__)
     stats = RuntimeStats()
     state = LessonState.load(config.state_file)
+
+    if config.start_chapter is not None:
+        previous_chapter = state.chapter
+        if previous_chapter != config.start_chapter or state.lesson_title is not None:
+            logger.info(
+                "Configured start chapter %s overrides resume state (previous %s)",
+                config.start_chapter,
+                previous_chapter if previous_chapter is not None else "none",
+            )
+        state.chapter = config.start_chapter
+        state.lesson_title = None
 
     async with async_playwright() as playwright:
         launch_args = ["--start-maximized"]
