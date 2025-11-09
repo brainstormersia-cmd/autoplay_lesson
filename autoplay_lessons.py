@@ -50,6 +50,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "selectors_json": None,
     "progress_threshold": 100,
     "use_gui": False,
+    "slow_mo": 0,
+    "user_data_dir": None,
 }
 
 DURATION_PATTERN = re.compile(r"\b(?:(?P<h>\d{1,2})\s*:\s*)?(?P<m>\d{1,2})\s*:\s*(?P<s>\d{2})\b")
@@ -142,6 +144,8 @@ class Config:
     page_timeout: float
     progress_threshold: int
     use_gui: bool
+    slow_mo: int
+    user_data_dir: Optional[Path]
 
     def chapter_in_scope(self, chapter: Optional[int]) -> bool:
         if chapter is None:
@@ -177,6 +181,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> Config:
     parser.add_argument("--navigation-timeout", type=float, default=DEFAULT_CONFIG["navigation_timeout"], help="Navigation timeout in seconds")
     parser.add_argument("--page-timeout", type=float, default=DEFAULT_CONFIG["page_timeout"], help="Generic page wait timeout in seconds")
     parser.add_argument("--progress-threshold", type=int, default=DEFAULT_CONFIG["progress_threshold"], help="Skip lessons whose detected progress is greater or equal to this percentage")
+    parser.add_argument("--slow", type=int, default=DEFAULT_CONFIG["slow_mo"], help="Delay in milliseconds applied between Playwright actions")
+    parser.add_argument("--user-data-dir", type=Path, default=DEFAULT_CONFIG["user_data_dir"], help="Use an existing Chrome user data directory for persistent login")
     parser.add_argument("--gui", action="store_true", help="Launch a minimal GUI to choose chapter range and start playback")
 
     args = parser.parse_args(argv)
@@ -214,6 +220,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> Config:
         page_timeout=args.page_timeout,
         progress_threshold=args.progress_threshold,
         use_gui=args.gui,
+        slow_mo=max(0, args.slow),
+        user_data_dir=args.user_data_dir,
     )
 
 
@@ -252,6 +260,8 @@ def summarise_config(config: Config) -> str:
         f"  Progress threshold: >={config.progress_threshold}% will be skipped\n"
         f"  Selectors: {selectors_preview}\n"
         f"  State file: {config.state_file}\n"
+        f"  Slow-mo: {config.slow_mo}ms\n"
+        f"  Chrome profile: {config.user_data_dir or '<none>'}\n"
         f"  Logging to: {config.log_file or 'console only'}\n"
     )
 
@@ -383,6 +393,47 @@ def prompt_for_missing_url(config: Config) -> Config:
         if entered:
             return replace(config, url=entered)
         print("L'URL non può essere vuoto.")
+
+
+async def ensure_course_ready(page: Page, config: Config, logger: logging.Logger) -> bool:
+    """Wait for the chapter list to be visible, prompting the user if login is required."""
+
+    selector = config.selectors["chapter_title"]
+    attempt = 0
+    timeout_ms = max(1000, int(config.page_timeout * 1000))
+    while True:
+        attempt += 1
+        try:
+            await page.wait_for_selector(selector, timeout=timeout_ms)
+            logger.info("Detected chapters on page (%s)", selector)
+            return True
+        except PlaywrightTimeout:
+            current_url = page.url
+            logger.warning(
+                "No chapters found yet (attempt %s, selector %s, URL %s)",
+                attempt,
+                selector,
+                current_url,
+            )
+            if not sys.stdin.isatty():
+                return False
+
+            logger.info(
+                "If the platform requires login, authenticate in the opened browser window, then press Invio to retry."
+            )
+            loop = asyncio.get_running_loop()
+
+            def ask() -> str:
+                try:
+                    return input("Premi Invio dopo aver effettuato l'accesso (stop per annullare): ")
+                except EOFError:
+                    return "stop"
+
+            response = await loop.run_in_executor(None, ask)
+            if response.strip().lower() == "stop":
+                logger.error("Execution stopped while waiting for chapters to appear")
+                return False
+            logger.info("Retrying chapter detection…")
 
 
 def parse_duration(text: str) -> Optional[int]:
@@ -1006,10 +1057,15 @@ async def run(config: Config) -> RuntimeStats:
     state = LessonState.load(config.state_file)
 
     async with async_playwright() as playwright:
+        launch_args = ["--start-maximized"]
+        if config.user_data_dir:
+            launch_args.append(f"--user-data-dir={config.user_data_dir}")
+
         browser: Browser = await playwright.chromium.launch(
             channel="chrome",
             headless=config.headless,
-            args=["--start-maximized"],
+            slow_mo=config.slow_mo or None,
+            args=launch_args,
         )
         context = await browser.new_context(viewport={"width": 1366, "height": 900})
         page = await context.new_page()
@@ -1022,11 +1078,17 @@ async def run(config: Config) -> RuntimeStats:
         )
         await wait_for_network_idle(page, config.navigation_timeout)
 
+        logger.info("Current URL after navigation: %s", page.url)
+
         status = response.status if response else None
         if response and response.ok:
             logger.info("Reached %s successfully (status %s)", config.url, status)
         else:
             logger.warning("Reached %s with status %s", config.url, status or "unknown")
+
+        if not await ensure_course_ready(page, config, logger):
+            await browser.close()
+            return stats
 
         logger.info("Scanning chapters to compute estimated duration")
         (
@@ -1049,6 +1111,7 @@ async def run(config: Config) -> RuntimeStats:
             )
         else:
             logger.warning("Plan found no lessons to play with the current filters")
+            logger.warning("If this is unexpected, ensure you are logged in and the page lists the lessons")
 
         if plan_entries:
             for entry in plan_entries:

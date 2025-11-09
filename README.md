@@ -36,6 +36,8 @@ Opzioni principali:
 - `--log-file`: abilita logging su file oltre che su console.
 - `--mute`: prova a mutare il player dopo il click.
 - `--progress-threshold`: salta le lezioni che mostrano un progresso percentuale maggiore o uguale alla soglia indicata (default 100 per saltare solo quelle al 100%).
+- `--slow`: imposta un ritardo (in millisecondi) tra le azioni di Playwright per osservare meglio l'automazione (es. `--slow 1000`).
+- `--user-data-dir`: usa il profilo Chrome indicato per riutilizzare i cookie già autenticati.
 - `--gui`: apre una mini interfaccia per scegliere i capitoli di inizio/fine prima di avviare Playwright.
 
 Lanciare `python autoplay_lessons.py --help` per la lista completa delle opzioni.
@@ -47,6 +49,8 @@ Esegui `python autoplay_lessons.py --gui` per aprire una finestra che permette d
 ## Pianificazione e durata stimata
 
 All'avvio, lo script espande i capitoli disponibili, legge le durate delle lezioni e stampa un riepilogo del numero di lezioni da riprodurre, dei capitoli coinvolti e del tempo totale previsto. I log elencano anche il dettaglio capitolo per capitolo. Se non è stato scelto un intervallo a monte e il terminale è interattivo, dopo la scansione viene chiesto di selezionare l'intervallo desiderato prima di proseguire. Le lezioni già completate (div con classe `w-1/12 text-xs md:text-xs` che mostra `100%`) o oltre la soglia `--progress-threshold` vengono escluse automaticamente dal conteggio.
+
+Se dopo la navigazione la pagina mostra la schermata di login (o non compaiono capitoli), la console invita a completare l'autenticazione nella finestra di Chrome e a premere Invio per ritentare. In alternativa, puoi passare `--user-data-dir` con il percorso del tuo profilo Chrome per entrare già loggato.
 
 ## File di stato
 
@@ -83,3 +87,4 @@ Utilizzare lo script solo nel rispetto dei Termini di Servizio della piattaforma
 - Retry con backoff su click e apertura capitoli, auto-scroll progressivo.
 - Modalità GUI opzionale e riepilogo preventivo della durata stimata prima dell'avvio.
 - Prompt interattivo per URL e selezione capitoli con log dettagliato del piano per capitolo.
+- Opzioni per rallentare l'automazione (`--slow`) e riutilizzare un profilo Chrome esistente (`--user-data-dir`), con attesa guidata per il login manuale.
