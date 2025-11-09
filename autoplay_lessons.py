@@ -57,7 +57,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 DURATION_PATTERN = re.compile(r"\b(?:(?P<h>\d{1,2})\s*:\s*)?(?P<m>\d{1,2})\s*:\s*(?P<s>\d{2})\b")
-CHAPTER_PATTERN = re.compile(r"^\s*(?P<num>\d+)\s*-\s+")
+DASH_CHARACTERS = "-–—"
+NON_BREAKING_SPACES = "\u00a0\u202f"
+CHAPTER_PATTERN = re.compile(
+    rf"^[\s{NON_BREAKING_SPACES}]*(?P<num>\d+)[\s{NON_BREAKING_SPACES}]*[{DASH_CHARACTERS}][\s{NON_BREAKING_SPACES}]+"
+)
 PROGRESS_PATTERN = re.compile(r"(?P<value>\d{1,3})\s*%")
 WIDTH_PATTERN = re.compile(r"width\s*:\s*(?P<value>\d{1,3})%")
 
@@ -540,8 +544,16 @@ def parse_duration(text: str) -> Optional[int]:
     return hours * 3600 + minutes * 60 + seconds
 
 
+def normalise_text_spacing(text: str) -> str:
+    """Replace non-breaking space variants with regular spaces."""
+
+    for char in NON_BREAKING_SPACES:
+        text = text.replace(char, " ")
+    return text
+
+
 def extract_chapter_number(text: str) -> Optional[int]:
-    match = CHAPTER_PATTERN.search(text)
+    match = CHAPTER_PATTERN.search(normalise_text_spacing(text))
     if match:
         return int(match.group("num"))
     return None
@@ -686,11 +698,25 @@ async def wait_for_network_idle(page: Page, timeout: float) -> None:
 async def locate_chapter(
     context: FrameLike, selectors: Dict[str, str], chapter_number: int
 ) -> Optional[Locator]:
-    locator = context.locator(
-        f"{selectors['chapter_title']}:text-matches('^\\s*{chapter_number}\\s*-\\s+', 'i')"
+    pattern = re.compile(
+        rf"^[\s{NON_BREAKING_SPACES}]*{chapter_number}[\s{NON_BREAKING_SPACES}]*[{DASH_CHARACTERS}][\s{NON_BREAKING_SPACES}]+",
+        re.IGNORECASE,
     )
+    locator = context.locator(selectors["chapter_title"]).filter(has_text=pattern)
     if await locator.count():
         return locator.first
+
+    headers = context.locator(selectors["chapter_title"])
+    count = await headers.count()
+    for index in range(count):
+        candidate = headers.nth(index)
+        try:
+            raw_text = await candidate.inner_text(timeout=1000)
+        except PlaywrightError:
+            continue
+        text = normalise_text_spacing(raw_text)
+        if pattern.search(text) or extract_chapter_number(text) == chapter_number:
+            return candidate
     return None
 
 
