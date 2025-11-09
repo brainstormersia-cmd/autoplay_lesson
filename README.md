@@ -39,6 +39,7 @@ Opzioni principali:
 - `--slow`: imposta un ritardo (in millisecondi) tra le azioni di Playwright per osservare meglio l'automazione (es. `--slow 1000`).
 - `--user-data-dir`: usa il profilo Chrome indicato per riutilizzare i cookie già autenticati.
 - `--gui`: apre una mini interfaccia per scegliere i capitoli di inizio/fine prima di avviare Playwright.
+- `--diagnose-selectors`: stampa un report dei match per i selettori (anche dentro eventuali iframe) e termina senza avviare la riproduzione.
 
 Lanciare `python autoplay_lessons.py --help` per la lista completa delle opzioni.
 
@@ -51,6 +52,18 @@ Esegui `python autoplay_lessons.py --gui` per aprire una finestra che permette d
 All'avvio, lo script espande i capitoli disponibili, legge le durate delle lezioni e stampa un riepilogo del numero di lezioni da riprodurre, dei capitoli coinvolti e del tempo totale previsto. I log elencano anche il dettaglio capitolo per capitolo. Se non è stato scelto un intervallo a monte e il terminale è interattivo, dopo la scansione viene chiesto di selezionare l'intervallo desiderato prima di proseguire. Le lezioni già completate (div con classe `w-1/12 text-xs md:text-xs` che mostra `100%`) o oltre la soglia `--progress-threshold` vengono escluse automaticamente dal conteggio.
 
 Se dopo la navigazione la pagina mostra la schermata di login (o non compaiono capitoli), la console invita a completare l'autenticazione nella finestra di Chrome e a premere Invio per ritentare. In alternativa, puoi passare `--user-data-dir` con il percorso del tuo profilo Chrome per entrare già loggato.
+
+### Debug dei selettori e pannello laterale
+
+Se Playwright non trova i capitoli, l'opzione `--diagnose-selectors` aiuta a capire dove risiedono gli elementi nel DOM: vengono elencati tutti i frame (iframe compresi) insieme al numero di match per ciascun selettore configurato, oltre a qualche anteprima del testo trovato. Il log prova anche selettori di supporto come `text=Contenuti del Corso` e la cella `100%` del progresso Pegaso.
+
+Esempio:
+
+```bash
+python autoplay_lessons.py --url "https://lms.pegaso.multiversity.click/videolezioni/0501906IUS15/" --diagnose-selectors
+```
+
+Lo script ora identifica automaticamente il frame che contiene la colonna "Contenuti del Corso" e focalizza lo scroll su quell'area quando serve. Se i capitoli appaiono dopo aver scrollato il pannello destro, i log mostreranno tentativi di `mouse.wheel` specifici per quella sezione.
 
 ## File di stato
 
@@ -88,3 +101,4 @@ Utilizzare lo script solo nel rispetto dei Termini di Servizio della piattaforma
 - Modalità GUI opzionale e riepilogo preventivo della durata stimata prima dell'avvio.
 - Prompt interattivo per URL e selezione capitoli con log dettagliato del piano per capitolo.
 - Opzioni per rallentare l'automazione (`--slow`) e riutilizzare un profilo Chrome esistente (`--user-data-dir`), con attesa guidata per il login manuale.
+- Diagnostica dei selettori (`--diagnose-selectors`) e rilevamento automatico dei capitoli dentro frame/pannelli scrollabili.

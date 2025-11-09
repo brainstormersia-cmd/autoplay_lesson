@@ -10,11 +10,12 @@ import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from playwright.async_api import (
     Browser,
     Error as PlaywrightError,
+    Frame,
     Locator,
     Page,
     TimeoutError as PlaywrightTimeout,
@@ -52,12 +53,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "use_gui": False,
     "slow_mo": 0,
     "user_data_dir": None,
+    "diagnose_selectors": False,
 }
 
 DURATION_PATTERN = re.compile(r"\b(?:(?P<h>\d{1,2})\s*:\s*)?(?P<m>\d{1,2})\s*:\s*(?P<s>\d{2})\b")
 CHAPTER_PATTERN = re.compile(r"^\s*(?P<num>\d+)\s*-\s+")
 PROGRESS_PATTERN = re.compile(r"(?P<value>\d{1,3})\s*%")
 WIDTH_PATTERN = re.compile(r"width\s*:\s*(?P<value>\d{1,3})%")
+
+
+FrameLike = Union[Page, Frame]
 
 
 @dataclass
@@ -146,6 +151,7 @@ class Config:
     use_gui: bool
     slow_mo: int
     user_data_dir: Optional[Path]
+    diagnose_selectors: bool
 
     def chapter_in_scope(self, chapter: Optional[int]) -> bool:
         if chapter is None:
@@ -184,6 +190,11 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> Config:
     parser.add_argument("--slow", type=int, default=DEFAULT_CONFIG["slow_mo"], help="Delay in milliseconds applied between Playwright actions")
     parser.add_argument("--user-data-dir", type=Path, default=DEFAULT_CONFIG["user_data_dir"], help="Use an existing Chrome user data directory for persistent login")
     parser.add_argument("--gui", action="store_true", help="Launch a minimal GUI to choose chapter range and start playback")
+    parser.add_argument(
+        "--diagnose-selectors",
+        action="store_true",
+        help="Print selector diagnostics after navigation and exit",
+    )
 
     args = parser.parse_args(argv)
 
@@ -222,6 +233,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> Config:
         use_gui=args.gui,
         slow_mo=max(0, args.slow),
         user_data_dir=args.user_data_dir,
+        diagnose_selectors=args.diagnose_selectors,
     )
 
 
@@ -262,6 +274,7 @@ def summarise_config(config: Config) -> str:
         f"  State file: {config.state_file}\n"
         f"  Slow-mo: {config.slow_mo}ms\n"
         f"  Chrome profile: {config.user_data_dir or '<none>'}\n"
+        f"  Diagnose selectors: {config.diagnose_selectors}\n"
         f"  Logging to: {config.log_file or 'console only'}\n"
     )
 
@@ -395,45 +408,126 @@ def prompt_for_missing_url(config: Config) -> Config:
         print("L'URL non può essere vuoto.")
 
 
-async def ensure_course_ready(page: Page, config: Config, logger: logging.Logger) -> bool:
-    """Wait for the chapter list to be visible, prompting the user if login is required."""
+def describe_context(context: FrameLike) -> str:
+    if isinstance(context, Page):
+        return f"page({context.url})"
+    name = context.name or "<unnamed>"
+    return f"frame {name} ({context.url})"
+
+
+def iter_contexts(page: Page) -> List[FrameLike]:
+    contexts: List[FrameLike] = []
+    seen: set[int] = set()
+    for context in [page, *page.frames]:
+        identifier = id(context)
+        if identifier in seen:
+            continue
+        contexts.append(context)
+        seen.add(identifier)
+    return contexts
+
+
+async def log_frame_diagnostics(
+    page: Page, selector: str, logger: logging.Logger, label: Optional[str] = None
+) -> None:
+    heading = label or selector
+    logger.info("Selector diagnostic for %s", heading)
+    for context in iter_contexts(page):
+        context_label = describe_context(context)
+        try:
+            locator = context.locator(selector)
+            count = await locator.count()
+        except PlaywrightError as exc:
+            logger.info("  %s -> locator error: %s", context_label, exc)
+            continue
+
+        logger.info("  %s -> %s matches", context_label, count)
+        if not count:
+            continue
+        try:
+            samples = await locator.all_inner_texts()
+        except PlaywrightError:
+            continue
+        if samples:
+            preview = ", ".join(text.strip().replace("\n", " ") for text in samples[:3])
+            logger.info("    samples: %s", preview)
+
+
+async def ensure_course_ready(
+    page: Page, config: Config, logger: logging.Logger
+) -> Optional[FrameLike]:
+    """Locate the frame or page containing the chapter list, prompting the user if needed."""
 
     selector = config.selectors["chapter_title"]
     attempt = 0
-    timeout_ms = max(1000, int(config.page_timeout * 1000))
     while True:
         attempt += 1
-        try:
-            await page.wait_for_selector(selector, timeout=timeout_ms)
-            logger.info("Detected chapters on page (%s)", selector)
-            return True
-        except PlaywrightTimeout:
-            current_url = page.url
-            logger.warning(
-                "No chapters found yet (attempt %s, selector %s, URL %s)",
-                attempt,
-                selector,
-                current_url,
-            )
-            if not sys.stdin.isatty():
-                return False
+        for context in iter_contexts(page):
+            try:
+                locator = context.locator(selector)
+                count = await locator.count()
+            except PlaywrightError as exc:
+                logger.debug("Selector check failed in %s: %s", describe_context(context), exc)
+                continue
+            if count:
+                logger.info(
+                    "Detected %s chapter headers in %s using %s",
+                    count,
+                    describe_context(context),
+                    selector,
+                )
+                return context
 
-            logger.info(
-                "If the platform requires login, authenticate in the opened browser window, then press Invio to retry."
-            )
-            loop = asyncio.get_running_loop()
+        logger.warning(
+            "No chapters found yet (attempt %s, selector %s, URL %s)",
+            attempt,
+            selector,
+            page.url,
+        )
+        await log_frame_diagnostics(page, selector, logger)
 
-            def ask() -> str:
-                try:
-                    return input("Premi Invio dopo aver effettuato l'accesso (stop per annullare): ")
-                except EOFError:
-                    return "stop"
+        if not sys.stdin.isatty():
+            return None
 
-            response = await loop.run_in_executor(None, ask)
-            if response.strip().lower() == "stop":
-                logger.error("Execution stopped while waiting for chapters to appear")
-                return False
-            logger.info("Retrying chapter detection…")
+        logger.info(
+            "If the platform requires login, authenticate in the opened browser window, then press Invio to retry."
+        )
+        loop = asyncio.get_running_loop()
+
+        def ask() -> str:
+            try:
+                return input("Premi Invio dopo aver effettuato l'accesso (stop per annullare): ")
+            except EOFError:
+                return "stop"
+
+        response = await loop.run_in_executor(None, ask)
+        if response.strip().lower() == "stop":
+            logger.error("Execution stopped while waiting for chapters to appear")
+            return None
+        logger.info("Retrying chapter detection…")
+
+
+async def run_selector_diagnostics(
+    page: Page, context: FrameLike, config: Config, logger: logging.Logger
+) -> None:
+    logger.info("Running selector diagnostics (no playback will occur)")
+    for key, selector in config.selectors.items():
+        await log_frame_diagnostics(page, selector, logger, label=f"{key} -> {selector}")
+
+    heuristics: Tuple[Tuple[str, str], ...] = (
+        ("panel heading", "text=Contenuti del Corso"),
+        ("progress cell", "css=.w-1/12"),
+    )
+    for label, selector in heuristics:
+        await log_frame_diagnostics(page, selector, logger, label=label)
+
+    try:
+        locator = context.locator(config.selectors["chapter_title"])
+        texts = await locator.all_inner_texts()
+    except PlaywrightError:
+        texts = []
+    if texts:
+        logger.info("First chapter headers detected: %s", "; ".join(t.strip() for t in texts[:3]))
 
 
 def parse_duration(text: str) -> Optional[int]:
@@ -464,8 +558,15 @@ async def ensure_visible(locator: Locator) -> None:
         pass
 
 
-async def scroll_with_wheel(page: Page, attempts: int = 3, step: int = 600) -> None:
+async def scroll_with_wheel(
+    page: Page, attempts: int = 3, step: int = 600, target: Optional[Locator] = None
+) -> None:
     for _ in range(attempts):
+        if target is not None:
+            try:
+                await target.hover()
+            except PlaywrightError:
+                pass
         await page.mouse.wheel(0, step)
         await page.wait_for_timeout(200)
 
@@ -582,8 +683,10 @@ async def wait_for_network_idle(page: Page, timeout: float) -> None:
         logging.getLogger(__name__).warning("Network idle wait timed out after %.1fs", timeout)
 
 
-async def locate_chapter(page: Page, selectors: Dict[str, str], chapter_number: int) -> Optional[Locator]:
-    locator = page.locator(
+async def locate_chapter(
+    context: FrameLike, selectors: Dict[str, str], chapter_number: int
+) -> Optional[Locator]:
+    locator = context.locator(
         f"{selectors['chapter_title']}:text-matches('^\\s*{chapter_number}\\s*-\\s+', 'i')"
     )
     if await locator.count():
@@ -592,10 +695,15 @@ async def locate_chapter(page: Page, selectors: Dict[str, str], chapter_number: 
 
 
 async def expand_chapter(
-    page: Page, selectors: Dict[str, str], chapter_number: int, config: Config, logger: logging.Logger
+    context: FrameLike,
+    page: Page,
+    selectors: Dict[str, str],
+    chapter_number: int,
+    config: Config,
+    logger: logging.Logger,
 ) -> bool:
     async def action() -> None:
-        locator = await locate_chapter(page, selectors, chapter_number)
+        locator = await locate_chapter(context, selectors, chapter_number)
         if locator is None:
             raise RuntimeError(f"Chapter {chapter_number} not found")
         await ensure_visible(locator)
@@ -637,11 +745,15 @@ async def expand_chapter(
 
 
 async def collect_lesson_rows(
-    page: Page, selectors: Dict[str, str], logger: logging.Logger, config: Config
+    context: FrameLike,
+    page: Page,
+    selectors: Dict[str, str],
+    logger: logging.Logger,
+    config: Config,
 ) -> List[Locator]:
     lessons: List[Locator] = []
-    title_nodes = page.locator(selectors["lesson_title"])
-    duration_nodes = page.locator(selectors["duration"])
+    title_nodes = context.locator(selectors["lesson_title"])
+    duration_nodes = context.locator(selectors["duration"])
 
     duration_parents: List[Locator] = []
     for index in range(await duration_nodes.count()):
@@ -692,7 +804,13 @@ async def collect_lesson_rows(
 
     if not lessons:
         logger.warning("No lessons detected; attempting scroll")
-        await scroll_with_wheel(page, attempts=5)
+        anchor: Optional[Locator] = None
+        try:
+            if await title_nodes.count():
+                anchor = title_nodes.first
+        except PlaywrightError:
+            anchor = None
+        await scroll_with_wheel(page, attempts=5, target=anchor)
     return lessons
 
 
@@ -709,13 +827,14 @@ async def read_lesson_title(row: Locator, config: Config, timeout_ms: float) -> 
 
 
 async def collect_course_plan(
+    context: FrameLike,
     page: Page,
     config: Config,
     logger: logging.Logger,
     state: LessonState,
 ) -> tuple[int, int, int, List[ChapterPlanEntry]]:
     plan_state = LessonState(chapter=state.chapter, lesson_title=state.lesson_title)
-    chapter_locators = page.locator(config.selectors["chapter_title"])
+    chapter_locators = context.locator(config.selectors["chapter_title"])
     count = await chapter_locators.count()
     planned_lessons = 0
     planned_seconds = 0
@@ -736,10 +855,10 @@ async def collect_course_plan(
         if plan_state.chapter and chapter_number < plan_state.chapter:
             continue
 
-        if not await expand_chapter(page, config.selectors, chapter_number, config, logger):
+        if not await expand_chapter(context, page, config.selectors, chapter_number, config, logger):
             continue
         await page.wait_for_timeout(200)
-        rows = await collect_lesson_rows(page, config.selectors, logger, config)
+        rows = await collect_lesson_rows(context, page, config.selectors, logger, config)
         chapter_lessons = 0
         chapter_seconds = 0
         for row in rows:
@@ -980,6 +1099,7 @@ async def play_lesson(
 
 async def process_chapter(
     page: Page,
+    context: FrameLike,
     chapter_number: int,
     config: Config,
     logger: logging.Logger,
@@ -991,14 +1111,14 @@ async def process_chapter(
         return True
 
     logger.info("Opening chapter %s", chapter_number)
-    if not await expand_chapter(page, config.selectors, chapter_number, config, logger):
+    if not await expand_chapter(context, page, config.selectors, chapter_number, config, logger):
         logger.warning("Chapter %s could not be opened", chapter_number)
         return False
 
     stats.new_chapter(chapter_number)
 
     try:
-        await page.wait_for_selector(
+        await context.wait_for_selector(
             config.selectors["lesson_title"],
             timeout=config.page_timeout * 1000,
         )
@@ -1006,7 +1126,7 @@ async def process_chapter(
         logger.warning("Lesson titles did not appear in time for chapter %s", chapter_number)
 
     await page.wait_for_timeout(500)
-    lessons = await collect_lesson_rows(page, config.selectors, logger, config)
+    lessons = await collect_lesson_rows(context, page, config.selectors, logger, config)
     if not lessons:
         logger.warning("No lessons in chapter %s", chapter_number)
         return True
@@ -1021,8 +1141,15 @@ async def process_chapter(
     return True
 
 
-async def iterate_chapters(page: Page, config: Config, logger: logging.Logger, state: LessonState, stats: RuntimeStats) -> None:
-    chapter_locators = page.locator(config.selectors["chapter_title"])
+async def iterate_chapters(
+    page: Page,
+    context: FrameLike,
+    config: Config,
+    logger: logging.Logger,
+    state: LessonState,
+    stats: RuntimeStats,
+) -> None:
+    chapter_locators = context.locator(config.selectors["chapter_title"])
     count = await chapter_locators.count()
     if not count:
         logger.error("No chapters found with selector %s", config.selectors["chapter_title"])
@@ -1045,7 +1172,7 @@ async def iterate_chapters(page: Page, config: Config, logger: logging.Logger, s
             logger.info("Skipping chapter %s (before resume state)", chapter_number)
             continue
 
-        if not await process_chapter(page, chapter_number, config, logger, stats, state):
+        if not await process_chapter(page, context, chapter_number, config, logger, stats, state):
             break
 
     logger.info("Finished iterating chapters")
@@ -1086,7 +1213,13 @@ async def run(config: Config) -> RuntimeStats:
         else:
             logger.warning("Reached %s with status %s", config.url, status or "unknown")
 
-        if not await ensure_course_ready(page, config, logger):
+        lesson_context = await ensure_course_ready(page, config, logger)
+        if lesson_context is None:
+            await browser.close()
+            return stats
+
+        if config.diagnose_selectors:
+            await run_selector_diagnostics(page, lesson_context, config, logger)
             await browser.close()
             return stats
 
@@ -1096,7 +1229,7 @@ async def run(config: Config) -> RuntimeStats:
             planned_seconds,
             planned_chapters,
             plan_entries,
-        ) = await collect_course_plan(page, config, logger, state)
+        ) = await collect_course_plan(lesson_context, page, config, logger, state)
 
         stats.planned_lessons = planned_lessons
         stats.planned_seconds = planned_seconds
@@ -1146,7 +1279,7 @@ async def run(config: Config) -> RuntimeStats:
         elif state.chapter:
             logger.info("Resuming from chapter %s", state.chapter)
 
-        await iterate_chapters(page, config, logger, state, stats)
+        await iterate_chapters(page, lesson_context, config, logger, state, stats)
 
         await browser.close()
 
