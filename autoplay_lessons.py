@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from playwright.async_api import (
     Browser,
+    ElementHandle,
     Error as PlaywrightError,
     Frame,
     Locator,
@@ -67,6 +68,9 @@ WIDTH_PATTERN = re.compile(r"width\s*:\s*(?P<value>\d{1,3})%")
 
 
 FrameLike = Union[Page, Frame]
+
+
+_SCROLL_CONTAINER_CACHE: Dict[int, ElementHandle] = {}
 
 
 @dataclass
@@ -552,6 +556,15 @@ def normalise_text_spacing(text: str) -> str:
     return text
 
 
+def format_bounding_box(bbox: Optional[Dict[str, float]]) -> str:
+    if not bbox:
+        return "<unknown>"
+    return (
+        f"x={bbox['x']:.0f}, y={bbox['y']:.0f}, "
+        f"w={bbox['width']:.0f}, h={bbox['height']:.0f}"
+    )
+
+
 def extract_chapter_number(text: str) -> Optional[int]:
     match = CHAPTER_PATTERN.search(normalise_text_spacing(text))
     if match:
@@ -570,17 +583,104 @@ async def ensure_visible(locator: Locator) -> None:
         pass
 
 
+async def get_scroll_container(
+    context: FrameLike, selectors: Dict[str, str], logger: logging.Logger
+) -> Optional[ElementHandle]:
+    identifier = id(context)
+    cached = _SCROLL_CONTAINER_CACHE.get(identifier)
+    if cached is not None:
+        try:
+            if await cached.evaluate("el => !!el && el.isConnected"):
+                return cached
+        except PlaywrightError:
+            _SCROLL_CONTAINER_CACHE.pop(identifier, None)
+
+    try:
+        header_locator = context.locator(selectors["chapter_title"]).first
+        if await header_locator.count() == 0:
+            return None
+        header = await header_locator.element_handle()
+    except PlaywrightError:
+        return None
+    if header is None:
+        return None
+
+    try:
+        handle = await context.evaluate_handle(
+            "(node) => {"
+            "  let current = node;"
+            "  while (current) {"
+            "    const style = window.getComputedStyle(current);"
+            "    if (style && /(auto|scroll)/.test(style.overflowY)) {"
+            "      if (current.scrollHeight - current.clientHeight > 8) {"
+            "        return current;"
+            "      }"
+            "    }"
+            "    current = current.parentElement;"
+            "  }"
+            "  return document.scrollingElement || document.body;"
+            "}",
+            header,
+        )
+    except PlaywrightError as exc:
+        logger.debug("Unable to detect scroll container: %s", exc)
+        return None
+
+    element = handle.as_element() if handle else None
+    if element is None:
+        return None
+
+    _SCROLL_CONTAINER_CACHE[identifier] = element
+    return element
+
+
 async def scroll_with_wheel(
-    page: Page, attempts: int = 3, step: int = 600, target: Optional[Locator] = None
+    page: Page,
+    context: FrameLike,
+    selectors: Dict[str, str],
+    logger: logging.Logger,
+    *,
+    attempts: int = 3,
+    step: int = 600,
+    anchor: Optional[Locator] = None,
 ) -> None:
-    for _ in range(attempts):
-        if target is not None:
+    panel = await get_scroll_container(context, selectors, logger)
+    for attempt in range(1, attempts + 1):
+        if panel is not None:
             try:
-                await target.hover()
-            except PlaywrightError:
-                pass
-        await page.mouse.wheel(0, step)
-        await page.wait_for_timeout(200)
+                metrics = await panel.evaluate(
+                    "(el, dy) => {"
+                    "  el.scrollBy({ top: dy, behavior: 'instant' });"
+                    "  return { top: el.scrollTop, height: el.scrollHeight, view: el.clientHeight };"
+                    "}",
+                    step,
+                )
+                metrics = metrics or {}
+                logger.info(
+                    "Scrolling lesson panel by %s px (attempt %s/%s) -> top=%s height=%s view=%s",
+                    step,
+                    attempt,
+                    attempts,
+                    int(metrics.get("top", 0)),
+                    int(metrics.get("height", 0)),
+                    int(metrics.get("view", 0)),
+                )
+            except PlaywrightError as exc:
+                logger.warning("Panel scroll attempt %s failed: %s", attempt, exc)
+                _SCROLL_CONTAINER_CACHE.pop(id(context), None)
+                panel = None
+                continue
+        else:
+            if anchor is not None:
+                try:
+                    await anchor.hover()
+                except PlaywrightError:
+                    pass
+            await page.mouse.wheel(0, step)
+            logger.info(
+                "Fallback page scroll by %s px (attempt %s/%s)", step, attempt, attempts
+            )
+        await page.wait_for_timeout(250)
 
 
 async def exponential_retry(
@@ -618,53 +718,77 @@ async def take_error_screenshot(page: Page, prefix: str = "error") -> Optional[P
     return None
 
 
-async def is_completed(row: Locator, threshold: int) -> bool:
-    """Return True if the lesson row appears completed.
+async def extract_progress_value(
+    row: Locator, text_hint: Optional[str] = None
+) -> Optional[int]:
+    """Extract the highest progress percentage visible for a lesson row."""
 
-    This is intentionally conservative; adjust the logic to match the platform.
-    TODO: replace generic checks below with a selector specific to the completion badge or icon.
-    """
+    best: Optional[int] = None
 
-    try:
-        text = (await row.inner_text(timeout=1000)).strip()
-    except PlaywrightError:
-        return False
-
-    for match in PROGRESS_PATTERN.finditer(text):
-        if int(match.group("value")) >= threshold:
-            return True
+    if text_hint:
+        for match in PROGRESS_PATTERN.finditer(text_hint):
+            value = int(match.group("value"))
+            best = value if best is None else max(best, value)
 
     try:
         percentage_cells = row.locator("div.w-1/12.text-xs.md\\:text-xs")
         for index in range(await percentage_cells.count()):
-            cell_text = (await percentage_cells.nth(index).inner_text(timeout=500)).strip()
-            match = PROGRESS_PATTERN.search(cell_text)
-            if match and int(match.group("value")) >= threshold:
-                return True
+            try:
+                cell_text = (await percentage_cells.nth(index).inner_text(timeout=500)).strip()
+            except PlaywrightError:
+                continue
+            for match in PROGRESS_PATTERN.finditer(cell_text):
+                value = int(match.group("value"))
+                best = value if best is None else max(best, value)
     except PlaywrightError:
         pass
 
-    style = await row.get_attribute("style")
+    try:
+        style = await row.get_attribute("style")
+    except PlaywrightError:
+        style = None
     if style:
         match = WIDTH_PATTERN.search(style)
-        if match and int(match.group("value")) >= threshold:
-            return True
+        if match:
+            value = int(match.group("value"))
+            best = value if best is None else max(best, value)
 
-    # Search for accessible completion cues (e.g., "Completata")
-    if "complet" in text.lower():
-        return True
+    try:
+        progressbars = row.locator("[role='progressbar']")
+        for index in range(await progressbars.count()):
+            try:
+                aria_value = await progressbars.nth(index).get_attribute("aria-valuenow")
+            except PlaywrightError:
+                continue
+            if aria_value and aria_value.isdigit():
+                value = int(aria_value)
+                best = value if best is None else max(best, value)
+    except PlaywrightError:
+        pass
 
-    # Progress bar semantics (e.g., aria-valuenow="60")
-    progressbars = row.locator("[role='progressbar']")
-    for index in range(await progressbars.count()):
+    text_to_check = text_hint
+    if text_to_check is None:
         try:
-            aria_value = await progressbars.nth(index).get_attribute("aria-valuenow")
+            text_to_check = (await row.inner_text(timeout=500)).strip()
         except PlaywrightError:
-            continue
-        if aria_value and aria_value.isdigit() and int(aria_value) >= threshold:
-            return True
+            text_to_check = None
+    if text_to_check and "complet" in text_to_check.lower():
+        best = 100 if best is None else max(best, 100)
 
-    return False
+    return best
+
+
+async def evaluate_progress(
+    row: Locator, threshold: int, text_hint: Optional[str] = None
+) -> tuple[Optional[int], bool]:
+    progress = await extract_progress_value(row, text_hint)
+    completed = progress is not None and progress >= threshold
+    return progress, completed
+
+
+async def is_completed(row: Locator, threshold: int) -> bool:
+    _, completed = await evaluate_progress(row, threshold)
+    return completed
 
 
 async def try_mute(page: Page) -> None:
@@ -777,67 +901,116 @@ async def collect_lesson_rows(
     logger: logging.Logger,
     config: Config,
 ) -> List[Locator]:
-    lessons: List[Locator] = []
-    title_nodes = context.locator(selectors["lesson_title"])
-    duration_nodes = context.locator(selectors["duration"])
-
-    duration_parents: List[Locator] = []
-    for index in range(await duration_nodes.count()):
-        node = duration_nodes.nth(index)
-        try:
-            text = await node.inner_text(timeout=config.page_timeout * 1000)
-        except PlaywrightError:
-            continue
-        if parse_duration(text or "") is not None:
-            parent = node.locator("xpath=ancestor-or-self::*[self::li or self::div or self::section][1]")
-            duration_parents.append(parent if await parent.count() else node)
-
     seen_positions: set = set()
-    for index in range(await title_nodes.count()):
-        title = title_nodes.nth(index)
-        row = title.locator("xpath=ancestor-or-self::*[self::li or self::div or self::section][1]")
-        if not await row.count():
-            row = title
+    collected: List[Locator] = []
+    max_cycles = 6
+    previous_total = 0
 
-        has_duration = False
-        for parent in duration_parents:
-            try:
-                if await parent.filter(has=row).count() or await row.filter(has=parent).count():
-                    has_duration = True
-                    break
-            except PlaywrightError:
-                continue
-        if not has_duration:
-            try:
-                raw_text = await row.inner_text(timeout=config.page_timeout * 1000)
-            except PlaywrightError:
-                continue
-            if parse_duration(raw_text) is None:
-                continue
-
-        try:
-            bounding_box = await row.bounding_box()
-        except PlaywrightError:
-            bounding_box = None
-        key = (
-            round(bounding_box["x"]) if bounding_box else 0,
-            round(bounding_box["y"]) if bounding_box else index,
-        )
-        if key in seen_positions:
-            continue
-        seen_positions.add(key)
-        lessons.append(row)
-
-    if not lessons:
-        logger.warning("No lessons detected; attempting scroll")
+    async def gather_once() -> tuple[List[Locator], Optional[Locator]]:
+        title_nodes = context.locator(selectors["lesson_title"])
+        duration_nodes = context.locator(selectors["duration"])
         anchor: Optional[Locator] = None
         try:
-            if await title_nodes.count():
+            if await duration_nodes.count():
+                anchor = duration_nodes.first
+            elif await title_nodes.count():
                 anchor = title_nodes.first
         except PlaywrightError:
             anchor = None
-        await scroll_with_wheel(page, attempts=5, target=anchor)
-    return lessons
+
+        duration_parents: List[Locator] = []
+        for index in range(await duration_nodes.count()):
+            node = duration_nodes.nth(index)
+            try:
+                text = await node.inner_text(timeout=config.page_timeout * 1000)
+            except PlaywrightError:
+                continue
+            if parse_duration(text or "") is not None:
+                parent = node.locator(
+                    "xpath=ancestor-or-self::*[self::li or self::div or self::section][1]"
+                )
+                duration_parents.append(parent if await parent.count() else node)
+
+        new_rows: List[Locator] = []
+        title_count = await title_nodes.count()
+        for index in range(title_count):
+            title = title_nodes.nth(index)
+            row = title.locator(
+                "xpath=ancestor-or-self::*[self::li or self::div or self::section][1]"
+            )
+            if not await row.count():
+                row = title
+
+            has_duration = False
+            for parent in duration_parents:
+                try:
+                    if await parent.filter(has=row).count() or await row.filter(has=parent).count():
+                        has_duration = True
+                        break
+                except PlaywrightError:
+                    continue
+            if not has_duration:
+                try:
+                    raw_text = await row.inner_text(timeout=config.page_timeout * 1000)
+                except PlaywrightError:
+                    continue
+                if parse_duration(raw_text) is None:
+                    continue
+
+            try:
+                bounding_box = await row.bounding_box()
+            except PlaywrightError:
+                bounding_box = None
+            key = (
+                round(bounding_box["x"]) if bounding_box else 0,
+                round(bounding_box["y"]) if bounding_box else index,
+            )
+            if key in seen_positions:
+                continue
+            seen_positions.add(key)
+            new_rows.append(row)
+
+        return new_rows, anchor
+
+    for cycle in range(1, max_cycles + 1):
+        new_rows, anchor = await gather_once()
+        if new_rows:
+            collected.extend(new_rows)
+        if len(collected) == previous_total:
+            if collected:
+                break
+        else:
+            previous_total = len(collected)
+
+        if cycle == max_cycles:
+            break
+
+        if not collected:
+            logger.warning(
+                "No lessons detected; attempting scroll (cycle %s/%s)", cycle, max_cycles
+            )
+        else:
+            logger.info(
+                "Collected %s lessons so far; scrolling to search for more (cycle %s/%s)",
+                len(collected),
+                cycle,
+                max_cycles,
+            )
+
+        await scroll_with_wheel(
+            page,
+            context,
+            selectors,
+            logger,
+            attempts=2,
+            step=600,
+            anchor=anchor,
+        )
+
+    if not collected:
+        logger.warning("Unable to detect lessons after %s cycles", max_cycles)
+
+    return collected
 
 
 async def read_lesson_title(row: Locator, config: Config, timeout_ms: float) -> tuple[str, Locator]:
@@ -876,9 +1049,30 @@ async def collect_course_plan(
         chapter_number = extract_chapter_number(text)
         if chapter_number is None:
             continue
+        try:
+            bbox = await header.bounding_box()
+        except PlaywrightError:
+            bbox = None
+        header_label = normalise_text_spacing(text)
+        logger.info(
+            "Chapter header %s/%s -> #%s '%s' bbox=%s",
+            index + 1,
+            count,
+            chapter_number,
+            header_label,
+            format_bounding_box(bbox),
+        )
         if not config.chapter_in_scope(chapter_number):
+            logger.info(
+                "  Skipping chapter %s (outside requested range)", chapter_number
+            )
             continue
         if plan_state.chapter and chapter_number < plan_state.chapter:
+            logger.info(
+                "  Skipping chapter %s (before resume chapter %s)",
+                chapter_number,
+                plan_state.chapter,
+            )
             continue
 
         if not await expand_chapter(context, page, config.selectors, chapter_number, config, logger):
@@ -887,31 +1081,74 @@ async def collect_course_plan(
         rows = await collect_lesson_rows(context, page, config.selectors, logger, config)
         chapter_lessons = 0
         chapter_seconds = 0
+        total_rows = 0
         for row in rows:
+            total_rows += 1
             timeout_ms = config.page_timeout * 1000
             title, _ = await read_lesson_title(row, config, timeout_ms)
-            if config.whitelist and not matches_patterns(config.whitelist, title):
-                continue
-            if config.blacklist and matches_patterns(config.blacklist, title):
-                continue
-
-            if plan_state.chapter == chapter_number and plan_state.lesson_title:
-                if plan_state.lesson_title == title:
-                    plan_state.chapter = None
-                    plan_state.lesson_title = None
-                else:
-                    continue
-
-            if await is_completed(row, config.progress_threshold):
-                continue
-
             try:
                 raw_text = await row.inner_text(timeout=timeout_ms)
             except PlaywrightError:
-                continue
+                raw_text = ""
             duration_seconds = parse_duration(raw_text)
-            if duration_seconds is None:
+            progress_value, completed = await evaluate_progress(
+                row, config.progress_threshold, raw_text
+            )
+            try:
+                bbox = await row.bounding_box()
+            except PlaywrightError:
+                bbox = None
+
+            duration_label = (
+                f"{duration_seconds}s" if duration_seconds is not None else "?s"
+            )
+            progress_label = (
+                f"{progress_value}%" if progress_value is not None else "?%"
+            )
+            base_message = (
+                f"    Lesson {chapter_number}.{total_rows} -> '{title}' "
+                f"duration={duration_label} progress={progress_label} "
+                f"bbox={format_bounding_box(bbox)}"
+            )
+
+            if config.whitelist and not matches_patterns(config.whitelist, title):
+                logger.info("%s -> SKIP (not in whitelist)", base_message)
                 continue
+            if config.blacklist and matches_patterns(config.blacklist, title):
+                logger.info("%s -> SKIP (matches blacklist)", base_message)
+                continue
+
+            resume_marker = False
+            if plan_state.chapter == chapter_number and plan_state.lesson_title:
+                if plan_state.lesson_title == title:
+                    resume_marker = True
+                    plan_state.chapter = None
+                    plan_state.lesson_title = None
+                else:
+                    logger.info(
+                        "%s -> SKIP (before resume '%s')",
+                        base_message,
+                        plan_state.lesson_title,
+                    )
+                    continue
+
+            if completed:
+                logger.info(
+                    "%s -> SKIP (progress %s%% >= threshold %s%%)",
+                    base_message,
+                    progress_value if progress_value is not None else "?",
+                    config.progress_threshold,
+                )
+                continue
+
+            if duration_seconds is None:
+                logger.info("%s -> SKIP (duration not found)", base_message)
+                continue
+
+            if resume_marker:
+                logger.info("%s -> resume marker reached; planned", base_message)
+            else:
+                logger.info("%s -> planned", base_message)
 
             planned_lessons += 1
             planned_seconds += duration_seconds
@@ -927,6 +1164,13 @@ async def collect_course_plan(
                     seconds=chapter_seconds,
                 )
             )
+        logger.info(
+            "  Chapter %s summary: detected %s lessons, planned %s (~%s)",
+            chapter_number,
+            total_rows,
+            chapter_lessons,
+            format_seconds(chapter_seconds) if chapter_seconds else "0s",
+        )
 
     entries.sort(key=lambda entry: entry.chapter)
     return planned_lessons, planned_seconds, planned_chapters, entries
@@ -1060,11 +1304,6 @@ async def play_lesson(
             stats.skipped += 1
             return
 
-    if await is_completed(row, config.progress_threshold):
-        logger.info("Skipping %s (already completed)", title)
-        stats.skipped += 1
-        return
-
     try:
         raw_text = await row.inner_text(timeout=timeout_ms)
     except PlaywrightError:
@@ -1075,7 +1314,29 @@ async def play_lesson(
         stats.skipped += 1
         return
 
-    logger.info("[%s/%s] Playing '%s' (%ss)", index, total, title, duration_seconds)
+    progress_value, completed = await evaluate_progress(
+        row, config.progress_threshold, raw_text
+    )
+    if completed:
+        logger.info(
+            "Skipping %s (progress %s%% >= threshold %s%%)",
+            title,
+            progress_value if progress_value is not None else "?",
+            config.progress_threshold,
+        )
+        stats.skipped += 1
+        return
+
+    progress_label = f"{progress_value}%" if progress_value is not None else "?%"
+    logger.info(
+        "[%s/%s] Playing '%s' (%ss, progress=%s, threshold=%s%%)",
+        index,
+        total,
+        title,
+        duration_seconds,
+        progress_label,
+        config.progress_threshold,
+    )
 
     async def click_action() -> None:
         await ensure_visible(title_locator)
@@ -1090,6 +1351,8 @@ async def play_lesson(
             exc,
         )
         asyncio.create_task(page.mouse.wheel(0, 400))
+
+    logger.info("Clicking lesson using locator %s", title_locator)
 
     clicked = await exponential_retry(
         click_action,
