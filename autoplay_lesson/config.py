@@ -8,10 +8,20 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Sequence
 
+try:  # pragma: no cover - optional dependency
+    import keyring  # type: ignore
+    from keyring.errors import KeyringError  # type: ignore
+except Exception:  # pragma: no cover - keyring may be missing
+    keyring = None  # type: ignore
+    KeyringError = Exception  # type: ignore
+
 
 DURATION_PATTERN = re.compile(r"\b(?:(?P<h>\d{1,2})\s*:\s*)?(?P<m>\d{1,2})\s*:\s*(?P<s>\d{2})\b")
 
 DEFAULT_USER_DATA_DIR = Path("~/.config/autoplay-lesson/chrome-profile").expanduser()
+CONFIG_DIR = Path.home() / ".autoplay_lesson"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+KEYRING_SERVICE = "autoplay_lesson"
 
 
 @dataclass(slots=True)
@@ -19,6 +29,9 @@ class RuntimeConfig:
     """Container for CLI or GUI supplied runtime configuration."""
 
     url: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    remember_me: bool = True
     after_play: int = 20
     buffer: int = 5
     max_wait: int = 3600
@@ -35,6 +48,7 @@ class RuntimeConfig:
     selectors_json: Optional[Path] = None
     selector_overrides: dict[str, str] = field(default_factory=dict)
     use_gui: bool = False
+    login_wait: float = 8.0
 
     whitelist: tuple[re.Pattern[str], ...] = field(default_factory=tuple)
     blacklist: tuple[re.Pattern[str], ...] = field(default_factory=tuple)
@@ -56,6 +70,7 @@ class RuntimeConfig:
             "Configurazione corrente:\n"
             f"  URL: {self.url}\n"
             f"  Profilo Chrome: {'attivo' if self.use_chrome_profile and self.user_data_dir else 'disattivato'}\n"
+            f"  Username: {self.username or '-'}\n"
             f"  Headless: {self.headless}\n"
             f"  Slow motion: {self.slow_mo}ms\n"
             f"  Attesa post play: {self.after_play}s\n"
@@ -70,6 +85,7 @@ class RuntimeConfig:
             f"  Diagnostica: {self.diagnose}\n"
             f"  Whitelist: {whitelist}\n"
             f"  Blacklist: {blacklist}\n"
+            f"  Ricordami: {self.remember_me}\n"
         )
         if self.selector_overrides:
             overrides = ", ".join(f"{k}={v}" for k, v in self.selector_overrides.items())
@@ -88,6 +104,140 @@ class RuntimeConfig:
 
 
 DEFAULTS = RuntimeConfig(url="https://esempio-corso")
+
+
+@dataclass(slots=True)
+class PersistentSettings:
+    """Representation of user supplied preferences stored on disk."""
+
+    url: str = ""
+    username: str = ""
+    user_data_dir: str = str(DEFAULT_USER_DATA_DIR)
+    remember_me: bool = True
+    headless: bool = False
+    use_chrome_profile: bool = True
+    after_play: int = DEFAULTS.after_play
+    buffer: int = DEFAULTS.buffer
+    slow_mo: int = DEFAULTS.slow_mo
+    diagnose: bool = False
+    start_chapter: Optional[int] = None
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "url": self.url,
+            "username": self.username,
+            "user_data_dir": self.user_data_dir,
+            "remember_me": self.remember_me,
+            "headless": self.headless,
+            "use_chrome_profile": self.use_chrome_profile,
+            "after_play": self.after_play,
+            "buffer": self.buffer,
+            "slow_mo": self.slow_mo,
+            "diagnose": self.diagnose,
+        }
+        if self.start_chapter is not None:
+            data["start_chapter"] = self.start_chapter
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "PersistentSettings":
+        start_chapter = data.get("start_chapter")
+        if isinstance(start_chapter, str):
+            try:
+                start_chapter = int(start_chapter)
+            except ValueError:
+                start_chapter = None
+        elif not isinstance(start_chapter, int):
+            start_chapter = None
+        return cls(
+            url=str(data.get("url", "")),
+            username=str(data.get("username", "")),
+            user_data_dir=str(data.get("user_data_dir", DEFAULT_USER_DATA_DIR)),
+            remember_me=bool(data.get("remember_me", True)),
+            headless=bool(data.get("headless", False)),
+            use_chrome_profile=bool(data.get("use_chrome_profile", True)),
+            after_play=int(data.get("after_play", DEFAULTS.after_play)),
+            buffer=int(data.get("buffer", DEFAULTS.buffer)),
+            slow_mo=int(data.get("slow_mo", DEFAULTS.slow_mo)),
+            diagnose=bool(data.get("diagnose", False)),
+            start_chapter=start_chapter,
+        )
+
+
+def _ensure_config_dir() -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:  # pragma: no cover - filesystem errors are non-critical
+        pass
+
+
+def load_persistent_settings() -> PersistentSettings:
+    """Load persisted GUI/CLI settings from disk."""
+
+    if not CONFIG_FILE.exists():
+        return PersistentSettings()
+    try:
+        raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):  # pragma: no cover - corrupted file guard
+        return PersistentSettings()
+    if not isinstance(raw, dict):
+        return PersistentSettings()
+    return PersistentSettings.from_dict(raw)
+
+
+def save_persistent_settings(settings: PersistentSettings) -> None:
+    """Persist settings to disk."""
+
+    _ensure_config_dir()
+    try:
+        CONFIG_FILE.write_text(json.dumps(settings.to_dict(), indent=2), encoding="utf-8")
+    except OSError:  # pragma: no cover - filesystem errors are non-critical
+        pass
+
+
+def clear_persistent_settings() -> None:
+    """Remove any persisted settings."""
+
+    try:
+        CONFIG_FILE.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:  # pragma: no cover - filesystem errors are non-critical
+        pass
+
+
+def keyring_available() -> bool:
+    """Return True if a usable keyring backend is available."""
+
+    return keyring is not None
+
+
+def load_saved_password(username: str) -> Optional[str]:
+    if not username or keyring is None:
+        return None
+    try:
+        return keyring.get_password(KEYRING_SERVICE, username)
+    except KeyringError:  # pragma: no cover - backend specific failures
+        return None
+
+
+def save_password(username: str, password: str) -> bool:
+    if not username or not password or keyring is None:
+        return False
+    try:
+        keyring.set_password(KEYRING_SERVICE, username, password)
+        return True
+    except KeyringError:  # pragma: no cover - backend specific failures
+        return False
+
+
+def delete_password(username: str) -> None:
+    if not username or keyring is None:
+        return
+    try:
+        keyring.delete_password(KEYRING_SERVICE, username)
+    except KeyringError:  # pragma: no cover - backend specific failures
+        return
 
 
 def _compile_patterns(values: Optional[Sequence[str]]) -> tuple[re.Pattern[str], ...]:
@@ -125,6 +275,16 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
     parser.add_argument("--blacklist", action="append", default=None, help="Regex titoli da escludere")
     parser.add_argument("--state-file", type=Path, default=DEFAULTS.state_file, help="File stato ripresa")
     parser.add_argument("--selectors-json", type=Path, help="Override selettori in JSON")
+    parser.add_argument("--username", help="Username della piattaforma")
+    parser.add_argument("--password", help="Password della piattaforma (sconsigliato su CLI)")
+    parser.add_argument("--remember", dest="remember_me", action="store_true", help="Salva credenziali e preferenze", default=None)
+    parser.add_argument(
+        "--no-remember",
+        dest="remember_me",
+        action="store_false",
+        help="Non salvare credenziali e preferenze",
+        default=None,
+    )
 
     args = parser.parse_args(argv)
 
@@ -133,21 +293,59 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
 
     selectors = parse_selectors(args.selectors_json)
 
+    settings = load_persistent_settings()
+
+    url = args.url
+    if url == DEFAULTS.url and settings.url:
+        url = settings.url
+
+    username = args.username or (settings.username or None)
+    remember_me = settings.remember_me if args.remember_me is None else args.remember_me
+    password = args.password
+    if not password and username:
+        password = load_saved_password(username)
+
+    start_chapter = args.start_chapter
+    if start_chapter is None:
+        start_chapter = settings.start_chapter
+
+    headless = settings.headless or args.headless
+
+    use_chrome_profile = not args.no_chrome_profile
+    if not args.no_chrome_profile:
+        use_chrome_profile = settings.use_chrome_profile
+
+    user_data_dir: Optional[Path]
+    if args.user_data_dir is not None:
+        user_data_dir = args.user_data_dir
+    else:
+        user_data_dir = Path(settings.user_data_dir).expanduser() if settings.user_data_dir else DEFAULT_USER_DATA_DIR
+
+    after_play = args.after_play if args.after_play != DEFAULTS.after_play else settings.after_play
+    buffer = args.buffer if args.buffer != DEFAULTS.buffer else settings.buffer
+    slow = max(0, args.slow)
+    if args.slow == DEFAULTS.slow_mo:
+        slow = settings.slow_mo
+    diagnose = args.diagnose or settings.diagnose
+
     config = RuntimeConfig(
-        url=args.url,
-        after_play=args.after_play,
-        buffer=args.buffer,
+        url=url,
+        username=username,
+        password=password,
+        remember_me=remember_me,
+        after_play=after_play,
+        buffer=buffer,
         max_wait=args.max_wait,
-        headless=args.headless,
-        start_chapter=args.start_chapter,
+        headless=headless,
+        start_chapter=start_chapter,
         end_chapter=args.end_chapter,
         lesson_render_wait=args.lesson_render_wait,
         log_file=args.log_file,
         progress_threshold=args.progress_threshold,
-        slow_mo=max(0, args.slow),
-        user_data_dir=args.user_data_dir or DEFAULT_USER_DATA_DIR,
-        use_chrome_profile=not args.no_chrome_profile,
-        diagnose=args.diagnose,
+        slow_mo=slow,
+        user_data_dir=user_data_dir,
+        use_chrome_profile=use_chrome_profile,
+        diagnose=diagnose,
         whitelist=whitelist,
         blacklist=blacklist,
         state_file=args.state_file,
