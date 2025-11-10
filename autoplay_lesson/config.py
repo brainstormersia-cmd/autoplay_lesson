@@ -36,6 +36,8 @@ class RuntimeConfig:
     after_play: int = 20
     buffer: int = 5
     max_wait: int = 3600
+    stall_timeout: float = 120.0
+    max_lesson_attempts: int = 2
     headless: bool = False
     start_chapter: Optional[int] = None
     end_chapter: Optional[int] = None
@@ -77,6 +79,8 @@ class RuntimeConfig:
             f"  Attesa post play: {self.after_play}s\n"
             f"  Buffer aggiuntivo: {self.buffer}s\n"
             f"  Tempo massimo per lezione: {self.max_wait}s\n"
+            f"  Timeout stallo lezione: {self.stall_timeout}s\n"
+            f"  Tentativi per lezione: {self.max_lesson_attempts}\n"
             f"  Start chapter: {self.start_chapter or '-'}\n"
             f"  End chapter: {self.end_chapter or '-'}\n"
             f"  Render wait capitolo: {self.lesson_render_wait}s\n"
@@ -290,6 +294,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
     parser.add_argument("--after-play", type=int, default=DEFAULTS.after_play, help="Attesa iniziale dopo il click play")
     parser.add_argument("--buffer", type=int, default=DEFAULTS.buffer, help="Buffer extra dopo la durata nominale")
     parser.add_argument("--max-wait", type=int, default=DEFAULTS.max_wait, help="Tempo massimo per singola lezione")
+    parser.add_argument("--stall-timeout", type=float, default=DEFAULTS.stall_timeout, help="Secondi senza progresso prima di forzare il riavvio")
+    parser.add_argument("--lesson-attempts", type=int, default=DEFAULTS.max_lesson_attempts, help="Tentativi massimi per la stessa lezione")
     parser.add_argument("--headless", action="store_true", help="Esegue in modalità headless")
     parser.add_argument("--start-chapter", type=int, help="Capitolo di partenza (1-based)")
     parser.add_argument("--end-chapter", type=int, help="Capitolo di termine (1-based)")
@@ -368,6 +374,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
         after_play=after_play,
         buffer=buffer,
         max_wait=args.max_wait,
+        stall_timeout=max(args.stall_timeout, 0),
+        max_lesson_attempts=max(1, args.lesson_attempts),
         headless=headless,
         start_chapter=start_chapter,
         end_chapter=args.end_chapter,
