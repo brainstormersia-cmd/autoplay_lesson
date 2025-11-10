@@ -39,9 +39,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "log_file": None,
     "mute": False,
     "selectors": {
-        "chapter_title": "div.align-left.flex.items-center.h-full.leading-normal.font-medium",
-        "lesson_title": "div.mb-2",
-        "duration": "div.text-sm.text-platform-gray",
+        "chapter_title": (
+            "div.align-left.flex.items-center.h-full.leading-normal.font-medium, "
+            "button[aria-expanded] span.font-semibold"
+        ),
+        "lesson_title": "div.mb-2, span.font-semibold, div.font-semibold",
+        "duration": "div.text-sm.text-platform-gray, span.text-sm, span.text-xs",
     },
     "state_file": ".state.json",
     "max_retries": 3,
@@ -962,44 +965,73 @@ async def collect_lesson_rows(
         except PlaywrightError:
             anchor = None
 
-        duration_parents: List[Locator] = []
-        for index in range(await duration_nodes.count()):
+        async def resolve_row(locator: Locator) -> Optional[Locator]:
+            try:
+                row_candidate = locator.locator(
+                    "xpath=ancestor-or-self::*[self::li or self::div or self::section][1]"
+                )
+                if await row_candidate.count():
+                    return row_candidate
+            except PlaywrightError:
+                pass
+            try:
+                return locator if await locator.count() else None
+            except PlaywrightError:
+                return None
+
+        duration_rows: List[Locator] = []
+        duration_positions: set[Tuple[int, int]] = set()
+        duration_count = await duration_nodes.count()
+        for index in range(duration_count):
             node = duration_nodes.nth(index)
             try:
                 text = await node.inner_text(timeout=config.page_timeout * 1000)
             except PlaywrightError:
                 continue
-            if parse_duration(text or "") is not None:
-                parent = node.locator(
-                    "xpath=ancestor-or-self::*[self::li or self::div or self::section][1]"
-                )
-                duration_parents.append(parent if await parent.count() else node)
+            if parse_duration(text or "") is None:
+                continue
+            row = await resolve_row(node)
+            if row is None:
+                continue
+            try:
+                bbox = await row.bounding_box()
+            except PlaywrightError:
+                bbox = None
+            if bbox is not None:
+                duration_positions.add((round(bbox["x"]), round(bbox["y"])))
+            duration_rows.append(row)
 
-        new_rows: List[Locator] = []
+        candidate_sources: List[Locator] = []
         title_count = await title_nodes.count()
         for index in range(title_count):
-            title = title_nodes.nth(index)
-            row = title.locator(
-                "xpath=ancestor-or-self::*[self::li or self::div or self::section][1]"
-            )
-            if not await row.count():
-                row = title
+            candidate_sources.append(title_nodes.nth(index))
 
-            has_duration = False
-            for parent in duration_parents:
+        if not candidate_sources:
+            candidate_sources.extend(duration_rows)
+
+        if not candidate_sources:
+            fallback_nodes = context.locator(
+                "xpath=//*[self::li or self::div or self::section]"
+            )
+            try:
+                fallback_total = min(await fallback_nodes.count(), 200)
+            except PlaywrightError:
+                fallback_total = 0
+            for index in range(fallback_total):
+                node = fallback_nodes.nth(index)
                 try:
-                    if await parent.filter(has=row).count() or await row.filter(has=parent).count():
-                        has_duration = True
-                        break
+                    raw_text = await node.inner_text(timeout=config.page_timeout * 1000)
                 except PlaywrightError:
                     continue
-            if not has_duration:
-                try:
-                    raw_text = await row.inner_text(timeout=config.page_timeout * 1000)
-                except PlaywrightError:
+                if parse_duration(raw_text or "") is None:
                     continue
-                if parse_duration(raw_text) is None:
-                    continue
+                candidate_sources.append(node)
+
+        new_rows: List[Locator] = []
+        for index, source in enumerate(candidate_sources):
+            row = await resolve_row(source)
+            if row is None:
+                continue
 
             try:
                 bounding_box = await row.bounding_box()
@@ -1013,8 +1045,28 @@ async def collect_lesson_rows(
                 if max_y is not None and bounding_box["y"] >= max_y - 2:
                     continue
 
+            has_duration = False
+            for parent in duration_rows:
+                try:
+                    if await parent.filter(has=row).count() or await row.filter(has=parent).count():
+                        has_duration = True
+                        break
+                except PlaywrightError:
+                    continue
+            if not has_duration and bounding_box is not None:
+                key_position = (round(bounding_box["x"]), round(bounding_box["y"]))
+                if key_position in duration_positions:
+                    has_duration = True
+            if not has_duration:
+                try:
+                    raw_text = await row.inner_text(timeout=config.page_timeout * 1000)
+                except PlaywrightError:
+                    continue
+                if parse_duration(raw_text) is None:
+                    continue
+
             key = (
-                round(bounding_box["x"]) if bounding_box else 0,
+                round(bounding_box["x"]) if bounding_box else index,
                 round(bounding_box["y"]) if bounding_box else index,
             )
             if key in seen_positions:
