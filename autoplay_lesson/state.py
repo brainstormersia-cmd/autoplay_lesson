@@ -10,6 +10,7 @@ from typing import Optional
 @dataclass(slots=True)
 class LessonState:
     chapter_index: Optional[int] = None
+    chapter_title: Optional[str] = None
     lesson_title: Optional[str] = None
 
     @classmethod
@@ -22,6 +23,7 @@ class LessonState:
             return cls()
         return cls(
             chapter_index=payload.get("chapter_index"),
+            chapter_title=payload.get("chapter_title"),
             lesson_title=payload.get("lesson_title"),
         )
 
@@ -31,6 +33,7 @@ class LessonState:
                 json.dumps(
                     {
                         "chapter_index": self.chapter_index,
+                        "chapter_title": self.chapter_title,
                         "lesson_title": self.lesson_title,
                     },
                     indent=2,

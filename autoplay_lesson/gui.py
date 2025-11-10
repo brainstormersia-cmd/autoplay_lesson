@@ -37,7 +37,13 @@ class AutoplayApp:
 
         self._settings = load_persistent_settings()
         self._stored_username = self._settings.username
-        self._stored_password = load_saved_password(self._settings.username) if self._settings.remember_me else None
+        if self._settings.remember_me:
+            stored_password = load_saved_password(self._settings.username)
+            if not stored_password:
+                stored_password = self._settings.get_password()
+        else:
+            stored_password = None
+        self._stored_password = stored_password
 
         self._build_form()
         self._build_log()
@@ -227,23 +233,26 @@ class AutoplayApp:
                 diagnose=config.diagnose,
                 start_chapter=config.start_chapter,
             )
-            save_persistent_settings(settings)
-            self._settings = settings
             if password and config.username:
-                if not save_password(config.username, password):
+                if save_password(config.username, password):
+                    settings.set_password(None)
+                else:
+                    settings.set_password(password)
                     if not keyring_available():
                         self._log_queue.put(
-                            "Keyring non disponibile: la password non verrà salvata."
+                            "Keyring non disponibile: la password verrà memorizzata localmente."
                         )
                     else:
                         self._log_queue.put(
-                            "Impossibile salvare la password nel keyring."
+                            "Impossibile salvare la password nel keyring, uso il salvataggio locale."
                         )
-                else:
-                    self._stored_password = password
+                self._stored_password = password
             else:
+                settings.set_password(None)
                 delete_password(config.username or "")
                 self._stored_password = None
+            save_persistent_settings(settings)
+            self._settings = settings
         else:
             clear_persistent_settings()
             delete_password(config.username or "")
