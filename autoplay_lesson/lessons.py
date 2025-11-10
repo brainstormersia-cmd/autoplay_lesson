@@ -16,10 +16,12 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from .config import DURATION_PATTERN, RuntimeConfig
+from .config import CourseMode, DURATION_PATTERN, RuntimeConfig
+from .quizzes import QuizSolver
 from .state import LessonState
 
-TITLE_EXCLUSIONS = ("test di fine lezione", "dispensa", "obiettivi")
+TITLE_EXCLUSIONS = ("dispensa", "obiettivi")
+QUIZ_KEYWORDS = ("test di fine lezione",)
 LESSON_ROW_SELECTOR = ":scope div.border-t.hover\\:bg-platform-hover-light"
 TITLE_SELECTOR = ":scope div.mb-2, :scope span.font-semibold, :scope .text-base .mb-2, :scope div.font-semibold, :scope h3, :scope h4"
 DURATION_SELECTOR = ":scope div.text-sm.text-platform-gray, :scope span.text-sm, :scope span.text-xs"
@@ -50,6 +52,11 @@ def _normalize_label(text: str) -> str:
 
 def _titles_equal(first: str, second: str) -> bool:
     return _normalize_label(first).lower() == _normalize_label(second).lower()
+
+
+def _is_quiz_title(title: str) -> bool:
+    lowered = title.lower()
+    return any(keyword in lowered for keyword in QUIZ_KEYWORDS)
 
 
 def _extract_chapter_number(title: str) -> Optional[int]:
@@ -177,6 +184,7 @@ class LessonCandidate:
     progress: Optional[int]
     locator: Locator
     bounding_box: Optional[dict[str, float]]
+    is_quiz: bool
     skip_reason: Optional[str]
 
     @property
@@ -436,11 +444,23 @@ async def collect_chapter_bounds(page: Page, logger, config: RuntimeConfig) -> l
     return results
 
 
-def _title_skip_reason(title: str, progress: Optional[int], config: RuntimeConfig) -> Optional[str]:
+def _title_skip_reason(
+    title: str,
+    progress: Optional[int],
+    config: RuntimeConfig,
+    *,
+    is_quiz: bool,
+) -> Optional[str]:
     lowered = title.lower()
     for keyword in TITLE_EXCLUSIONS:
         if keyword in lowered:
             return f"titolo contiene '{keyword}'"
+    if is_quiz:
+        if config.course_mode == CourseMode.COURSES_ONLY:
+            return "quiz escluso dalla modalità Solo Corsi"
+    else:
+        if config.course_mode == CourseMode.QUIZ_ONLY:
+            return "lezione esclusa dalla modalità Solo Quiz"
     if progress is not None and progress >= config.progress_threshold:
         return f"progress {progress}% >= soglia"
     for pattern in config.blacklist:
@@ -596,7 +616,8 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
         progress = await _extract_percentage(row, config)
         if progress is not None:
             progress_matches += 1
-        skip_reason = _title_skip_reason(title_raw, progress, config)
+        is_quiz = _is_quiz_title(title_raw)
+        skip_reason = _title_skip_reason(title_raw, progress, config, is_quiz=is_quiz)
         candidate = LessonCandidate(
             title=title_raw,
             title_raw=title_raw,
@@ -605,6 +626,7 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
             progress=progress,
             locator=row,
             bounding_box=bbox,
+            is_quiz=is_quiz,
             skip_reason=skip_reason,
         )
         results.append(candidate)
@@ -851,6 +873,9 @@ async def wait_for_lesson(
     page: Page,
     watchdog: Optional[ActivityWatchdog] = None,
 ) -> bool:
+    if candidate.is_quiz:
+        return await _solve_quiz(candidate, config, logger, stop_event, page, watchdog)
+
     base = config.after_play
     residual = max(0, (candidate.duration_seconds or 0) - base)
     planned_total = base + residual + config.buffer
@@ -1320,6 +1345,36 @@ async def _run_course_once(
     if stop_event.is_set():
         return False
     return True
+
+
+async def _solve_quiz(
+    candidate: LessonCandidate,
+    config: RuntimeConfig,
+    logger,
+    stop_event: asyncio.Event,
+    page: Page,
+    watchdog: Optional[ActivityWatchdog] = None,
+) -> bool:
+    logger.info("Avvio risoluzione quiz '%s'", candidate.title)
+    solver = QuizSolver(page, logger, config, stop_event, watchdog=watchdog)
+    outcome = await solver.solve()
+    if outcome.success:
+        logger.info(
+            "Quiz '%s' completato: %s tentativi, corrette %s/%s",
+            candidate.title,
+            outcome.attempts,
+            outcome.correct_answers,
+            outcome.total_questions,
+        )
+        return True
+    logger.error(
+        "Quiz '%s' non superato dopo %s tentativi (%s/%s corrette)",
+        candidate.title,
+        outcome.attempts,
+        outcome.correct_answers,
+        outcome.total_questions,
+    )
+    return False
 
 
 async def _verify_course_completion(

@@ -32,12 +32,14 @@ class LoggingSetup:
 
 def configure_logging(config: RuntimeConfig, *, log_queue: Optional["queue.Queue[str]"] = None) -> LoggingSetup:
     logger = logging.getLogger("autoplay_lesson")
-    logger.setLevel(logging.INFO)
+    level = logging.DEBUG if config.detailed_log else logging.INFO
+    logger.setLevel(level)
 
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
+    console_handler.setLevel(level)
 
     logger.handlers.clear()
     logger.addHandler(console_handler)
@@ -46,12 +48,14 @@ def configure_logging(config: RuntimeConfig, *, log_queue: Optional["queue.Queue
     if log_queue is not None:
         queue_handler = TkLogHandler(log_queue)
         queue_handler.setFormatter(formatter)
+        queue_handler.setLevel(level)
         logger.addHandler(queue_handler)
 
     if config.log_file:
         config.log_file.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(config.log_file, encoding="utf-8")
         file_handler.setFormatter(formatter)
+        file_handler.setLevel(level)
         logger.addHandler(file_handler)
 
     return LoggingSetup(logger=logger, queue_handler=queue_handler)
