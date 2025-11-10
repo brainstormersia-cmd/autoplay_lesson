@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .config import (
     DEFAULT_USER_DATA_DIR,
+    CourseMode,
     PersistentSettings,
     RuntimeConfig,
     clear_persistent_settings,
@@ -67,6 +68,9 @@ class AutoplayApp:
         self.profile_path_var = tk.StringVar(value=self._settings.user_data_dir or str(DEFAULT_USER_DATA_DIR))
         self.diagnose_var = tk.BooleanVar(value=self._settings.diagnose)
         self.remember_var = tk.BooleanVar(value=self._settings.remember_me)
+        self.mode_var = tk.StringVar(value=self._settings.course_mode or CourseMode.COMPLETE.value)
+        self.detailed_log_var = tk.BooleanVar(value=self._settings.detailed_log)
+        self.fast_mode_var = tk.BooleanVar(value=self._settings.fast_mode)
 
         self._add_labeled_entry(frame, "URL", self.url_var, row=0)
         self._add_labeled_entry(frame, "Username", self.username_var, row=1)
@@ -94,12 +98,48 @@ class AutoplayApp:
         self.profile_entry.grid(row=7, column=1, columnspan=3, padx=6, pady=4, sticky="we")
         self._toggle_profile_entry()
 
+        mode_frame = tk.LabelFrame(self.root, text="Modalità")
+        mode_frame.pack(fill="x", padx=10, pady=(0, 8))
+        tk.Radiobutton(
+            mode_frame,
+            text="Solo Quiz",
+            value=CourseMode.QUIZ_ONLY.value,
+            variable=self.mode_var,
+        ).pack(anchor="w", padx=8, pady=2)
+        tk.Radiobutton(
+            mode_frame,
+            text="Solo Corsi",
+            value=CourseMode.COURSES_ONLY.value,
+            variable=self.mode_var,
+        ).pack(anchor="w", padx=8, pady=2)
+        tk.Radiobutton(
+            mode_frame,
+            text="Corsi Completi",
+            value=CourseMode.COMPLETE.value,
+            variable=self.mode_var,
+        ).pack(anchor="w", padx=8, pady=2)
+
+        options_frame = tk.Frame(mode_frame)
+        options_frame.pack(fill="x", padx=4, pady=(4, 2))
+        tk.Checkbutton(
+            options_frame,
+            text="Log dettagliato",
+            variable=self.detailed_log_var,
+        ).pack(anchor="w", padx=4, pady=2)
+        tk.Checkbutton(
+            options_frame,
+            text="Modalità veloce",
+            variable=self.fast_mode_var,
+        ).pack(anchor="w", padx=4, pady=2)
+
         buttons = tk.Frame(self.root)
         buttons.pack(fill="x", padx=10)
         self.start_button = tk.Button(buttons, text="Start", command=self.start)
         self.start_button.pack(side=tk.LEFT, padx=6, pady=4)
         self.stop_button = tk.Button(buttons, text="Stop", command=self.stop, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=6, pady=4)
+        self.reset_button = tk.Button(buttons, text="Reset", command=self.reset)
+        self.reset_button.pack(side=tk.LEFT, padx=6, pady=4)
 
     def _toggle_profile_entry(self) -> None:
         state = tk.NORMAL if self.chrome_profile_var.get() else tk.DISABLED
@@ -173,6 +213,10 @@ class AutoplayApp:
         password = self.password_var.get()
         remember_me = self.remember_var.get()
         profile_path = self.profile_path_var.get().strip()
+        try:
+            course_mode = CourseMode(self.mode_var.get())
+        except ValueError:
+            course_mode = CourseMode.COMPLETE
 
         config = RuntimeConfig(
             url=url,
@@ -187,6 +231,9 @@ class AutoplayApp:
             use_chrome_profile=self.chrome_profile_var.get(),
             user_data_dir=Path(profile_path) if profile_path else DEFAULT_USER_DATA_DIR,
             diagnose=self.diagnose_var.get(),
+            course_mode=course_mode,
+            detailed_log=self.detailed_log_var.get(),
+            fast_mode=self.fast_mode_var.get(),
         )
 
         self._persist_preferences(config, password)
@@ -211,6 +258,19 @@ class AutoplayApp:
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
 
+    def reset(self) -> None:
+        if self._runner is not None:
+            self.stop()
+        # Svuota la coda dei log per evitare messaggi obsoleti
+        try:
+            while True:
+                self._log_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self.log_widget.configure(state=tk.NORMAL)
+        self.log_widget.delete("1.0", tk.END)
+        self.log_widget.configure(state=tk.DISABLED)
+
     def stop(self) -> None:
         if self._runner is None:
             return
@@ -232,6 +292,9 @@ class AutoplayApp:
                 slow_mo=config.slow_mo,
                 diagnose=config.diagnose,
                 start_chapter=config.start_chapter,
+                course_mode=config.course_mode.value,
+                detailed_log=config.detailed_log,
+                fast_mode=config.fast_mode,
             )
             if password and config.username:
                 if save_password(config.username, password):

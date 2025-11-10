@@ -6,6 +6,7 @@ import json
 import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -23,6 +24,23 @@ DEFAULT_USER_DATA_DIR = Path("~/.config/autoplay-lesson/chrome-profile").expandu
 CONFIG_DIR = Path.home() / ".autoplay_lesson"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 KEYRING_SERVICE = "autoplay_lesson"
+
+
+class CourseMode(str, Enum):
+    """Operational modes supported by the runner."""
+
+    COMPLETE = "complete"
+    COURSES_ONLY = "courses"
+    QUIZ_ONLY = "quizzes"
+
+    @property
+    def label(self) -> str:
+        mapping = {
+            CourseMode.COMPLETE: "Corsi completi",
+            CourseMode.COURSES_ONLY: "Solo corsi",
+            CourseMode.QUIZ_ONLY: "Solo quiz",
+        }
+        return mapping.get(self, self.value)
 
 
 @dataclass(slots=True)
@@ -52,6 +70,9 @@ class RuntimeConfig:
     selector_overrides: dict[str, str] = field(default_factory=dict)
     use_gui: bool = False
     login_wait: float = 8.0
+    course_mode: CourseMode = CourseMode.COMPLETE
+    detailed_log: bool = False
+    fast_mode: bool = False
 
     whitelist: tuple[re.Pattern[str], ...] = field(default_factory=tuple)
     blacklist: tuple[re.Pattern[str], ...] = field(default_factory=tuple)
@@ -108,6 +129,9 @@ class RuntimeConfig:
             f"  File log: {self.log_file or 'solo console'}\n"
             f"  File stato: {self.state_file}\n"
             f"  Diagnostica: {self.diagnose}\n"
+            f"  Modalità: {self.course_mode.label}\n"
+            f"  Log dettagliato: {self.detailed_log}\n"
+            f"  Modalità veloce quiz: {self.fast_mode}\n"
             f"  Whitelist: {whitelist}\n"
             f"  Blacklist: {blacklist}\n"
             f"  Ricordami: {self.remember_me}\n"
@@ -163,6 +187,9 @@ class PersistentSettings:
     diagnose: bool = False
     start_chapter: Optional[int] = None
     password_b64: Optional[str] = None
+    course_mode: str = CourseMode.COMPLETE.value
+    detailed_log: bool = False
+    fast_mode: bool = False
 
     def set_password(self, password: Optional[str]) -> None:
         self.password_b64 = _encode_password(password) if password else None
@@ -182,6 +209,9 @@ class PersistentSettings:
             "buffer": self.buffer,
             "slow_mo": self.slow_mo,
             "diagnose": self.diagnose,
+            "course_mode": self.course_mode,
+            "detailed_log": self.detailed_log,
+            "fast_mode": self.fast_mode,
         }
         if self.start_chapter is not None:
             data["start_chapter"] = self.start_chapter
@@ -215,6 +245,9 @@ class PersistentSettings:
             diagnose=bool(data.get("diagnose", False)),
             start_chapter=start_chapter,
             password_b64=password_b64,
+            course_mode=str(data.get("course_mode", CourseMode.COMPLETE.value)),
+            detailed_log=bool(data.get("detailed_log", False)),
+            fast_mode=bool(data.get("fast_mode", False)),
         )
 
 
@@ -341,6 +374,40 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
         help="Non salvare credenziali e preferenze",
         default=None,
     )
+    parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in CourseMode],
+        help="Modalità di esecuzione (complete, courses, quizzes)",
+        default=None,
+    )
+    parser.add_argument(
+        "--detailed-log",
+        dest="detailed_log",
+        action="store_true",
+        help="Abilita log dettagliato",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-detailed-log",
+        dest="detailed_log",
+        action="store_false",
+        help="Disabilita il log dettagliato",
+        default=None,
+    )
+    parser.add_argument(
+        "--fast-mode",
+        dest="fast_mode",
+        action="store_true",
+        help="Riduce i tempi di attesa durante i quiz",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-fast-mode",
+        dest="fast_mode",
+        action="store_false",
+        help="Disattiva la modalità veloce per i quiz",
+        default=None,
+    )
 
     args = parser.parse_args(argv)
 
@@ -357,6 +424,13 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
 
     username = args.username or (settings.username or None)
     remember_me = settings.remember_me if args.remember_me is None else args.remember_me
+    mode_value = args.mode or settings.course_mode or CourseMode.COMPLETE.value
+    try:
+        course_mode = CourseMode(mode_value)
+    except ValueError:
+        course_mode = CourseMode.COMPLETE
+    detailed_log = settings.detailed_log if args.detailed_log is None else args.detailed_log
+    fast_mode = settings.fast_mode if args.fast_mode is None else args.fast_mode
     password = args.password
     if not password and username:
         password = load_saved_password(username)
@@ -406,6 +480,9 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
         user_data_dir=user_data_dir,
         use_chrome_profile=use_chrome_profile,
         diagnose=diagnose,
+        course_mode=course_mode,
+        detailed_log=bool(detailed_log),
+        fast_mode=bool(fast_mode),
         whitelist=whitelist,
         blacklist=blacklist,
         state_file=args.state_file,
