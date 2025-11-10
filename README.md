@@ -1,104 +1,106 @@
-# Autoplay Lessons
+# Autoplay Lesson
 
-Script Python basato su Playwright per riprodurre in sequenza le lezioni di un corso online.
+Automazione Playwright modulare per riprodurre in sequenza le lezioni di un corso online Pegaso/Multiversity.
+
+## Novità principali
+
+- Avvio da CLI o da interfaccia grafica con pulsanti **Start/Stop** e pannello log.
+- Profilo Chrome persistente (channel="chrome") con riuso dei cookie personali tramite `user-data-dir`.
+- Rilevamento affidabile delle lezioni nel capitolo aperto tramite bounding box verticali.
+- Modalità diagnostica che stampa inventario dei capitoli e delle righe individuate senza avviare la riproduzione.
+- Logging dettagliato con riepilogo configurazione, tentativi di click, motivi di skip e tempi di attesa calcolati.
 
 ## Requisiti
 
-- Python 3.10+
-- [Playwright](https://playwright.dev/python/) installato e inizializzato (`pip install playwright` e `playwright install`)
+1. Python 3.10 o superiore.
+2. Dipendenze Python: `pip install -r requirements.txt`.
+3. Installazione componenti Playwright: `playwright install`.
 
-## Utilizzo rapido
+## Avvio rapido via CLI
 
 ```bash
-python autoplay_lessons.py \
+python -m autoplay_lesson \
   --url "https://lms.pegaso.multiversity.click/videolezioni/0501906IUS15/" \
   --after-play 20 \
   --buffer 5 \
-  --start-chapter 18 \
-  --end-chapter 22 \
-  --log-file run.log
+  --start-chapter 3 \
+  --headless \
+  --user-data-dir "C:/Users/<te>/AppData/Local/Google/Chrome/User Data"
 ```
-
-> Suggerimento: la soglia di default (`--progress-threshold 100`) salta esclusivamente le lezioni al 100%.
-> Se vuoi ignorare anche quelle già avviate imposta `--progress-threshold 0`.
 
 Opzioni principali:
 
-- `--url`: URL della pagina corso.
-- `--after-play`: secondi da attendere subito dopo il click sulla lezione (default 20).
-- `--buffer`: buffer aggiuntivo a fine video (default 5).
-- `--max-wait`: massima attesa per una singola lezione.
-- `--headless`: esegue Playwright in headless mode.
-- `--start-chapter` / `--end-chapter`: limita il range dei capitoli.
-- `--whitelist` / `--blacklist`: regex (ripetibili) per includere o escludere lezioni.
-- `--selectors-json`: file JSON con override dei selettori.
-- `--state-file`: percorso del file di stato per la ripresa (`.state.json` di default).
-- `--log-file`: abilita logging su file oltre che su console.
-- `--mute`: prova a mutare il player dopo il click.
-- `--progress-threshold`: salta le lezioni che mostrano un progresso percentuale maggiore o uguale alla soglia indicata (default 100 per saltare solo quelle al 100%).
-- `--slow`: imposta un ritardo (in millisecondi) tra le azioni di Playwright per osservare meglio l'automazione (es. `--slow 1000`).
-- `--user-data-dir`: usa il profilo Chrome indicato per riutilizzare i cookie già autenticati.
-- `--gui`: apre una mini interfaccia per scegliere i capitoli di inizio/fine prima di avviare Playwright.
-- `--diagnose-selectors`: stampa un report dei match per i selettori (anche dentro eventuali iframe) e termina senza avviare la riproduzione.
+- `--url`: URL della pagina corso (obbligatorio).
+- `--after-play`: attesa iniziale (secondi) dopo il click sulla lezione (default 20s).
+- `--buffer`: buffer aggiuntivo a fine video (default 5s).
+- `--max-wait`: tempo massimo da attendere per una singola lezione (default 3600s).
+- `--start-chapter` / `--end-chapter`: filtra i capitoli da processare (1-based).
+- `--headless`: esegue Playwright senza finestra grafica.
+- `--slow`: ritardo in millisecondi tra le azioni Playwright (utile per debugging visivo).
+- `--user-data-dir`: directory del profilo Chrome da riutilizzare (default: `~/.config/autoplay-lesson/chrome-profile`).
+- `--no-chrome-profile`: disattiva l'uso del profilo persistente.
+- `--diagnose`: modalità diagnostica, non avvia la riproduzione ma stampa inventario completo di capitoli/lezioni.
 
-Lanciare `python autoplay_lessons.py --help` per la lista completa delle opzioni.
+Il comando stampa subito il riepilogo della configurazione attiva e salva lo stato della riproduzione in `.state.json` per poter riprendere dall'ultima lezione completata.
 
-## Modalità GUI
+## Interfaccia grafica
 
-Esegui `python autoplay_lessons.py --gui` per aprire una finestra che permette di inserire subito l'URL del corso e l'intervallo dei capitoli. Dopo aver premuto **Avvia**, lo script apre la pagina, verifica da log di averla raggiunta e calcola la durata stimata prima di avviare l'autoplay.
+Esegui `python -m autoplay_lesson --gui` per aprire una finestra con i campi principali:
 
-## Pianificazione e durata stimata
+- URL del corso.
+- Capitolo di partenza (1-based).
+- Checkbox per modalità headless, uso profilo Chrome, modalità diagnostica.
+- Parametri numerici `after-play`, `buffer`, `slow`.
+- Pulsanti **Start** e **Stop**.
+- Area log scrollabile che mostra tutti gli eventi in tempo reale.
 
-All'avvio, lo script espande i capitoli disponibili, legge le durate delle lezioni e stampa un riepilogo del numero di lezioni da riprodurre, dei capitoli coinvolti e del tempo totale previsto. I log elencano anche il dettaglio capitolo per capitolo. Se non è stato scelto un intervallo a monte e il terminale è interattivo, dopo la scansione viene chiesto di selezionare l'intervallo desiderato prima di proseguire. Le lezioni già completate (div con classe `w-1/12 text-xs md:text-xs` che mostra `100%`) o oltre la soglia `--progress-threshold` vengono escluse automaticamente dal conteggio.
+Lo **Start** valida i campi, avvia Playwright in un thread dedicato e mostra il riepilogo della configurazione direttamente nel log. Il pulsante **Stop** invia una richiesta di arresto sicuro che chiude pagina, contesto e browser rilasciando le risorse senza eccezioni pendenti.
 
-Se dopo la navigazione la pagina mostra la schermata di login (o non compaiono capitoli), la console invita a completare l'autenticazione nella finestra di Chrome e a premere Invio per ritentare. In alternativa, puoi passare `--user-data-dir` con il percorso del tuo profilo Chrome per entrare già loggato.
+## Modalità diagnostica
 
-### Debug dei selettori e pannello laterale
+Con `--diagnose` (o spunta "Diagnostica" dalla GUI) il bot apre il capitolo richiesto, attende il rendering e stampa nel log:
 
-Se Playwright non trova i capitoli, l'opzione `--diagnose-selectors` aiuta a capire dove risiedono gli elementi nel DOM: vengono elencati tutti i frame (iframe compresi) insieme al numero di match per ciascun selettore configurato, oltre a qualche anteprima del testo trovato. Il log prova anche selettori di supporto come `text=Contenuti del Corso` e la cella `100%` del progresso Pegaso.
+- Numero totale di capitoli e rispettive posizioni verticali.
+- Elenco delle righe `cursor-pointer` comprese tra `y_min` e `y_max` del capitolo.
+- Per le prime 5 righe: titolo, durata raw, progress rilevato, bounding box e decisione (PLAY/SKIP) con motivazione.
+- Riepilogo finale di righe trovate, valide e scartate.
 
-Esempio:
+Questa modalità è utile per tarare i selettori o verificare eventuali modifiche del layout.
 
-```bash
-python autoplay_lessons.py --url "https://lms.pegaso.multiversity.click/videolezioni/0501906IUS15/" --diagnose-selectors
+## Rilevamento lezioni
+
+Dopo il click sul capitolo il bot attende `lesson_render_wait` (default 5.5s) e calcola l'intervallo verticale da analizzare (`y_min` header capitolo corrente, `y_max` header successivo). Nel range vengono processate tutte le righe `cursor-pointer`:
+
+- Titolo ricavato da `div.mb-2` / `span.font-semibold`.
+- Durata trovata tramite regex `mm:ss` o `h:mm:ss`.
+- Percentuale da `div.w-1/12.text-xs.md:text-xs` o fallback dal testo della riga.
+- Skip automatico per titoli contenenti "Test di fine lezione" o "Dispensa" (case-insensitive) e per progress >= soglia configurata.
+
+Ogni click sulla riga è soggetto a retry (fino a 3 tentativi con backoff esponenziale) e il log riporta tentativi ed eventuali errori.
+
+## Tempi di attesa
+
+Per ogni lezione valida vengono loggati e rispettati:
+
+- 20 secondi fissi post-click (`after-play`).
+- L'eventuale residuo della durata (durata - `after-play`).
+- Un buffer aggiuntivo configurabile (`buffer`).
+- Limite massimo (`max_wait`) per evitare loop infiniti.
+
+## Gestione profilo Chrome
+
+Di default viene usato Playwright Chromium con `channel="chrome"` e il profilo persistente specificato in `--user-data-dir` (di default `~/.config/autoplay-lesson/chrome-profile`). Per riutilizzare il tuo profilo Windows imposta ad esempio:
+
+```
+--user-data-dir "C:/Users/<nome>/AppData/Local/Google/Chrome/User Data"
 ```
 
-Lo script ora identifica automaticamente il frame che contiene la colonna "Contenuti del Corso" e focalizza lo scroll su quell'area quando serve. Se i capitoli appaiono dopo aver scrollato il pannello destro, i log mostreranno tentativi di `mouse.wheel` specifici per quella sezione.
+Puoi disattivare questo comportamento con `--no-chrome-profile` oppure togliendo la spunta dalla GUI.
 
 ## File di stato
 
-Dopo ogni lezione completata il bot aggiorna un file `.state.json` con capitolo e titolo dell'ultima lezione terminata. Alla successiva esecuzione il bot salterà automaticamente le lezioni già completate e riprenderà dalla successiva.
+Il file `.state.json` viene aggiornato dopo ogni lezione riprodotta con capitolo e titolo correnti. In caso di riavvio il bot continua dal capitolo/lezione salvati, saltando automaticamente ciò che risulta completato (progress >= soglia).
 
-## Override dei selettori
+## Licenza e note etiche
 
-È possibile fornire un file JSON con i selettori da sovrascrivere, ad esempio:
-
-```json
-{
-  "chapter_title": "div.chapter-header",
-  "lesson_title": "div.lesson-title",
-  "duration": "span.lesson-duration"
-}
-```
-
-Passare il percorso del file tramite `--selectors-json path/to/selectors.json`.
-
-## Logging ed errori
-
-Il logger stampa data/ora, livello, azione svolta e risultati. Se impostato `--log-file`, i messaggi vengono replicati anche su file. In caso di errore critico viene salvato uno screenshot in `./errors/` (nome `error_YYYYMMDD_HHMMSS.png`).
-
-## Etica e limiti
-
-Utilizzare lo script solo nel rispetto dei Termini di Servizio della piattaforma. Non automatizza test o quiz.
-
-## Changelog sintetico
-
-- Implementata CLI completa con configurazione centralizzata.
-- Supporto a salvataggio stato e ripresa automatica.
-- Logging strutturato con screenshot in caso di errore.
-- Parsing robusto delle durate (h:mm:ss, mm:ss) e skip delle lezioni completate, inclusi gli indicatori Pegaso `100%`.
-- Retry con backoff su click e apertura capitoli, auto-scroll progressivo.
-- Modalità GUI opzionale e riepilogo preventivo della durata stimata prima dell'avvio.
-- Prompt interattivo per URL e selezione capitoli con log dettagliato del piano per capitolo.
-- Opzioni per rallentare l'automazione (`--slow`) e riutilizzare un profilo Chrome esistente (`--user-data-dir`), con attesa guidata per il login manuale.
-- Diagnostica dei selettori (`--diagnose-selectors`) e rilevamento automatico dei capitoli dentro frame/pannelli scrollabili.
+Utilizzare lo strumento nel rispetto dei Termini di Servizio della piattaforma. L'automazione non esegue test o quiz e non aggira meccanismi di sicurezza.
