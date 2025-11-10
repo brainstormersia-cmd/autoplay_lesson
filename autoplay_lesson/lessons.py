@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -180,6 +182,137 @@ class LessonCandidate:
     @property
     def playable(self) -> bool:
         return self.skip_reason is None
+
+
+@dataclass(slots=True)
+class IncompleteLesson:
+    chapter_index: int
+    chapter_title: str
+    lesson_title: str
+    progress: int
+
+
+@dataclass(slots=True)
+class VerificationResult:
+    total_chapters: int
+    total_lessons: int
+    completed_lessons: int
+    incomplete_lessons: list[IncompleteLesson]
+
+    @property
+    def missing_count(self) -> int:
+        return len(self.incomplete_lessons)
+
+    @property
+    def lowest_incomplete(self) -> Optional[IncompleteLesson]:
+        if not self.incomplete_lessons:
+            return None
+        return min(
+            self.incomplete_lessons,
+            key=lambda item: (item.chapter_index, item.progress, item.lesson_title),
+        )
+
+
+class WatchdogExpired(RuntimeError):
+    """Raised when the activity watchdog reaches the configured timeout."""
+
+    def __init__(self, message: str, *, elapsed: Optional[float] = None) -> None:
+        super().__init__(message)
+        self.elapsed = elapsed
+
+
+class ActivityWatchdog:
+    """Background watchdog that requests a restart if no activity is recorded."""
+
+    def __init__(self, timeout: float, *, grace: int, logger) -> None:
+        self.timeout = max(0.0, timeout)
+        self.grace = max(0, grace)
+        self.logger = logger
+        self._last_ping = time.monotonic()
+        self._last_label = "startup"
+        self._task: Optional[asyncio.Task[None]] = None
+        self._expired = asyncio.Event()
+        self._expired_message = ""
+        self._elapsed_on_expire = 0.0
+        self._grace_used = 0
+
+    def start(self, stop_event: asyncio.Event) -> None:
+        if self.timeout <= 0:
+            return
+        self._last_ping = time.monotonic()
+        self._last_label = "startup"
+        self._expired.clear()
+        self._expired_message = ""
+        self._elapsed_on_expire = 0.0
+        self._grace_used = 0
+        self._task = asyncio.create_task(self._monitor(stop_event))
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._task = None
+
+    def ping(self, label: str) -> None:
+        if self.timeout <= 0:
+            return
+        self._last_ping = time.monotonic()
+        self._last_label = label
+        self._grace_used = 0
+
+    async def _monitor(self, stop_event: asyncio.Event) -> None:
+        interval = max(2.0, self.timeout / 3.0)
+        while not stop_event.is_set():
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                return
+            if stop_event.is_set():
+                return
+            elapsed = time.monotonic() - self._last_ping
+            if elapsed > self.timeout:
+                self._grace_used += 1
+                log = self.logger.warning if self._grace_used <= self.grace else self.logger.error
+                log(
+                    "Watchdog inattivo da %.1fs durante '%s' (grace %s/%s)",
+                    elapsed,
+                    self._last_label,
+                    min(self._grace_used, self.grace),
+                    self.grace,
+                )
+                if self._grace_used > self.grace:
+                    self._expired_message = (
+                        f"Timeout inattività dopo {elapsed:.1f}s (ultimo step: {self._last_label})"
+                    )
+                    self._elapsed_on_expire = elapsed
+                    self._expired.set()
+                    return
+                self._last_ping = time.monotonic()
+
+    def raise_if_expired(self) -> None:
+        if self._expired.is_set():
+            raise WatchdogExpired(
+                self._expired_message or f"Timeout inattività (ultimo step: {self._last_label})",
+                elapsed=self._elapsed_on_expire or None,
+            )
+
+    def expired(self) -> bool:
+        return self._expired.is_set()
+
+    @property
+    def last_label(self) -> str:
+        return self._last_label
+
+def _reset_state(state: LessonState, config: RuntimeConfig) -> None:
+    state.chapter_index = None
+    state.chapter_title = None
+    state.lesson_title = None
+    state.save(config.state_file)
 
 
 async def ensure_cookies(page: Page, logger) -> None:
@@ -438,12 +571,13 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
             bbox = await row.bounding_box()
         except PlaywrightError:
             bbox = None
-        if bbox:
-            y = bbox.get("y", float("nan"))
-            if not math.isnan(bounds.y_min) and y < bounds.y_min:
-                continue
-            if y >= bounds.y_max:
-                continue
+        # Bounding boxes were previously used to discard lessons that appeared
+        # outside the y-range measured when the chapter list was collapsed.
+        # Expanding a chapter shifts the layout, making those bounds stale and
+        # causing valid lessons to be skipped. Because the lesson locator is
+        # already scoped to the current chapter container, we no longer apply
+        # coordinate-based filtering; we keep the bounding box only for
+        # diagnostic purposes.
         try:
             title_locator = row.locator(_selector(config, "lesson_title", TITLE_SELECTOR)).first
             title_raw = (await title_locator.inner_text(timeout=1000)).strip()
@@ -501,7 +635,7 @@ async def _ensure_scroll_into_view(locator: Locator, timeout_ms: int) -> None:
 
 
 async def _prime_chapter_content(
-    page: Page, bounds: ChapterBounds, logger
+    page: Page, bounds: ChapterBounds, logger, config: RuntimeConfig
 ) -> None:
     try:
         label = _chapter_log_label(bounds)
@@ -516,36 +650,148 @@ async def _prime_chapter_content(
         await bounds.container.evaluate("el => { if (el) el.scrollTop = 0; }")
     except PlaywrightError:
         pass
-    steps = [600, 600, 600, -600, -600]
-    for delta in steps:
-        container_scrolled = False
+    lesson_locator = bounds.container.locator(
+        _selector(config, "lesson_row", LESSON_ROW_SELECTOR)
+    )
+    last_count = -1
+    stable_rounds = 0
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        fraction = (attempt + 1) / max_attempts
+        reached_end = False
         try:
-            container_scrolled = await bounds.container.evaluate(
-                "(el, amount) => {\n"
+            reached_end = await bounds.container.evaluate(
+                "(el, fraction) => {\n"
                 "  if (!el) { return false; }\n"
-                "  const max = (el.scrollHeight || 0) - (el.clientHeight || 0);\n"
+                "  const scrollHeight = el.scrollHeight || 0;\n"
+                "  const clientHeight = el.clientHeight || 0;\n"
+                "  const max = Math.max(scrollHeight - clientHeight, 0);\n"
                 "  if (max <= 0) { return false; }\n"
-                "  const next = Math.min(Math.max(el.scrollTop + amount, 0), max);\n"
-                "  if (Math.abs(next - el.scrollTop) < 1) {\n"
-                "    el.scrollTop = next;\n"
-                "    return false;\n"
-                "  }\n"
-                "  el.scrollTop = next;\n"
-                "  return true;\n"
+                "  const target = Math.min(max, Math.round(max * fraction));\n"
+                "  el.scrollTop = target;\n"
+                "  return target >= max - 2;\n"
                 "}",
-                delta,
+                fraction,
             )
         except PlaywrightError:
-            container_scrolled = False
-        if not container_scrolled:
+            reached_end = False
+        if not reached_end:
             try:
-                await page.mouse.wheel(0, delta)
+                await page.mouse.wheel(0, 600)
+            except PlaywrightError:
+                pass
+        try:
+            await page.wait_for_timeout(250)
+        except PlaywrightError:
+            pass
+        try:
+            current_count = await lesson_locator.count()
+        except PlaywrightError:
+            current_count = 0
+        if current_count == last_count and current_count != 0:
+            stable_rounds += 1
+        else:
+            stable_rounds = 0
+        logger.debug(
+            "Scroll capitolo %s tentativo %s/%s: righe=%s stabile=%s",
+            label,
+            attempt + 1,
+            max_attempts,
+            current_count,
+            stable_rounds,
+        )
+        last_count = current_count
+        if stable_rounds >= 2:
+            break
+    try:
+        await bounds.container.evaluate("el => { if (el) el.scrollTop = 0; }")
+    except PlaywrightError:
+        pass
+
+
+async def _refresh_chapter_bounds(
+    page: Page, bounds: ChapterBounds, logger, *, padding: float = 300.0
+) -> ChapterBounds:
+    try:
+        label = _chapter_log_label(bounds)
+    except Exception:  # pragma: no cover - defensive logging
+        label = f"#{bounds.index}"
+    try:
+        metrics = await bounds.container.evaluate(
+            "el => {\n"
+            "  if (!el) { return null; }\n"
+            "  const rect = el.getBoundingClientRect();\n"
+            "  const top = rect.top + window.scrollY;\n"
+            "  const height = rect.height;\n"
+            "  const scrollHeight = el.scrollHeight || height || 0;\n"
+            "  return { top, height, scrollHeight };\n"
+            "}"
+        )
+    except PlaywrightError:
+        metrics = None
+    new_y_min = bounds.y_min
+    new_y_max = bounds.y_max
+    if metrics:
+        top = metrics.get("top") if isinstance(metrics, dict) else None
+        if isinstance(top, (int, float)):
+            new_y_min = float(top)
+        height = 0.0
+        if isinstance(metrics, dict):
+            for key in ("scrollHeight", "height"):
+                value = metrics.get(key)
+                if isinstance(value, (int, float)):
+                    height = max(height, float(value))
+        if not math.isnan(new_y_min) and height > 0:
+            new_y_max = new_y_min + height + padding
+    else:
+        try:
+            bbox = await bounds.container.bounding_box()
+        except PlaywrightError:
+            bbox = None
+        if bbox:
+            top = bbox.get("y")
+            if isinstance(top, (int, float)):
+                new_y_min = float(top)
+            height = bbox.get("height")
+            if isinstance(height, (int, float)) and not math.isnan(new_y_min):
+                new_y_max = new_y_min + float(height) + padding
+    bounds.y_min = new_y_min
+    if math.isnan(bounds.y_min):
+        bounds.y_max = float("inf")
+    else:
+        if math.isnan(new_y_max) or new_y_max <= bounds.y_min:
+            new_y_max = bounds.y_min + 400
+        bounds.y_max = new_y_max
+    logger.debug(
+        "Bounds capitolo %s aggiornati: y_min=%s y_max=%s",
+        label,
+        bounds.y_min,
+        bounds.y_max,
+    )
+    return bounds
+
+
+async def _human_like_scroll(
+    page: Page, logger, config: RuntimeConfig, *, reason: str
+) -> None:
+    distance = max(60, int(config.lesson_scroll_distance))
+    jitter = max(0, int(config.lesson_scroll_jitter))
+    steps = random.randint(1, 3)
+    logger.debug("Scroll lezione '%s': passi=%s", reason, steps)
+    for step in range(steps):
+        offset = distance + random.randint(-jitter, jitter)
+        offset = max(40, offset)
+        try:
+            await page.mouse.wheel(0, offset)
+        except PlaywrightError:
+            try:
+                await page.evaluate(
+                    "delta => window.scrollBy({ left: 0, top: delta, behavior: 'smooth' })",
+                    offset,
+                )
             except PlaywrightError:
                 break
-        try:
-            await page.wait_for_timeout(200)
-        except PlaywrightError:
-            break
+        await asyncio.sleep(0.15 + random.random() * 0.25)
 
 
 async def click_with_retry(
@@ -603,6 +849,7 @@ async def wait_for_lesson(
     logger,
     stop_event: asyncio.Event,
     page: Page,
+    watchdog: Optional[ActivityWatchdog] = None,
 ) -> bool:
     base = config.after_play
     residual = max(0, (candidate.duration_seconds or 0) - base)
@@ -620,11 +867,17 @@ async def wait_for_lesson(
     start_time = loop.time()
     absolute_deadline = start_time + config.max_wait
     deadline = min(start_time + planned_total, absolute_deadline)
+    if watchdog:
+        watchdog.raise_if_expired()
+        watchdog.ping(f"attesa {candidate.title}")
     if await dismiss_video_restriction_popup(page, config, logger):
         logger.info(
             "Popup blocco video gestito all'avvio della lezione, attendo il render"
         )
         await asyncio.sleep(config.lesson_render_wait)
+    if watchdog:
+        watchdog.raise_if_expired()
+        watchdog.ping(f"riproduzione {candidate.title}")
     await _sleep_with_stop(stop_event, base)
     if await dismiss_video_restriction_popup(page, config, logger):
         logger.info(
@@ -636,8 +889,24 @@ async def wait_for_lesson(
         return False
     progress = candidate.progress or 0
     last_progress_change = loop.time()
+    scroll_interval = max(0.0, float(config.lesson_scroll_interval))
+    last_scroll = loop.time()
     while not stop_event.is_set():
+        if watchdog:
+            watchdog.raise_if_expired()
+            watchdog.ping(f"monitor {candidate.title}")
         now = loop.time()
+        if scroll_interval > 0 and now - last_scroll >= scroll_interval:
+            try:
+                await _human_like_scroll(
+                    page,
+                    logger,
+                    config,
+                    reason=f"monitor {candidate.title}",
+                )
+            except Exception:  # pragma: no cover - best effort
+                pass
+            last_scroll = loop.time()
         if now >= deadline:
             if progress >= config.progress_threshold or now >= absolute_deadline:
                 break
@@ -717,10 +986,21 @@ async def wait_for_lesson(
     return progress >= config.progress_threshold
 
 
-async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyncio.Event, state: LessonState) -> None:
+
+async def _run_course_once(
+    page: Page,
+    config: RuntimeConfig,
+    logger,
+    stop_event: asyncio.Event,
+    state: LessonState,
+    watchdog: Optional[ActivityWatchdog] = None,
+) -> bool:
     await ensure_cookies(page, logger)
     chapters = await collect_chapter_bounds(page, logger, config)
     logger.info("Rilevati %s capitoli", len(chapters))
+    if watchdog:
+        watchdog.raise_if_expired()
+        watchdog.ping("raccolta capitoli")
 
     start_index = 0
     if config.start_chapter is not None:
@@ -744,9 +1024,12 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
             if idx < start_index:
                 continue
             chapter_label = _chapter_log_label(bounds)
+            if watchdog:
+                watchdog.raise_if_expired()
+                watchdog.ping(f"capitolo {chapter_label}")
             if stop_event.is_set():
                 logger.info("Stop richiesto: uscita prima del capitolo %s", chapter_label)
-                return
+                return False
             if not config.chapter_in_scope(bounds.index, number=bounds.number):
                 continue
             if resume_chapter_title:
@@ -773,7 +1056,7 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                     "  if (!el) { return; }\n"
                     "  el.scrollIntoView({ behavior: 'smooth', block: 'center' });\n"
                     "  window.scrollBy(0, -120);\n"
-                    "}"
+                    "}\n"
                 )
                 await asyncio.sleep(0.7)
             except PlaywrightError:
@@ -784,7 +1067,7 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                             "  if (!el) { return; }\n"
                             "  el.scrollIntoView({ behavior: 'instant', block: 'center' });\n"
                             "  window.scrollBy(0, -120);\n"
-                            "}",
+                            "}\n",
                             await bounds.click_target.element_handle(),
                         )
                         await asyncio.sleep(0.3)
@@ -831,59 +1114,62 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                         )
                         continue
                 else:
-                    logger.error("Impossibile aprire capitolo %s", chapter_label)
+                    logger.error(
+                        "Impossibile aprire capitolo %s: click fallito e nessun fallback",
+                        chapter_label,
+                    )
                     continue
-            logger.info(
-                "Attesa %ss per render capitolo %s", config.lesson_render_wait, chapter_label
-            )
             await asyncio.sleep(config.lesson_render_wait)
+            await _prime_chapter_content(page, bounds, logger, config)
+            bounds = await _refresh_chapter_bounds(page, bounds, logger)
             try:
-                await bounds.container.evaluate("el => el && el.offsetHeight")
-                new_bbox = await bounds.container.bounding_box()
+                await page.wait_for_timeout(250)
             except PlaywrightError:
-                new_bbox = None
-            if new_bbox:
-                bounds.y_min = new_bbox.get("y", bounds.y_min)
-                height = new_bbox.get("height")
-                if height is not None:
-                    bounds.y_max = bounds.y_min + height + 300
-            await _prime_chapter_content(page, bounds, logger)
-
+                pass
             attempts: dict[str, int] = {}
-            logged_skips: set[str] = set()
             while True:
+                if watchdog:
+                    watchdog.raise_if_expired()
+                    watchdog.ping(f"scan {chapter_label}")
+                if stop_event.is_set():
+                    logger.info("Stop richiesto: uscita durante la scansione delle lezioni")
+                    return False
                 lessons = await collect_lessons(page, bounds, logger, config)
+                if watchdog:
+                    watchdog.ping(f"lezioni {chapter_label}")
                 valid = [lesson for lesson in lessons if lesson.playable]
                 skipped = [lesson for lesson in lessons if not lesson.playable]
-                logger.info(
-                    "Capitolo %s -> lezioni valide: %s, escluse: %s",
-                    chapter_label,
-                    len(valid),
-                    len(skipped),
-                )
-                for lesson in skipped:
-                    if lesson.title not in logged_skips:
-                        logger.info(
-                            "Skip lezione '%s': durata=%s(%ss) progress=%s%% motivo=%s",
-                            lesson.title,
-                            lesson.duration_label,
-                            lesson.duration_seconds,
-                            lesson.progress,
-                            lesson.skip_reason,
-                        )
-                        logged_skips.add(lesson.title)
-                    if (
-                        resume_chapter_index == bounds.index
-                        and resume_title
-                        and lesson.title == resume_title
-                    ):
-                        logger.info(
-                            "Ripresa: la lezione registrata '%s' è stata rilevata tra gli skip (motivo: %s)",
-                            lesson.title,
-                            lesson.skip_reason,
-                        )
-                        resume_title = None
-                        resume_chapter_index = None
+                logged_skips: set[str] = set()
+                if lessons:
+                    logger.info(
+                        "Capitolo %s -> lezioni valide: %s, escluse: %s",
+                        chapter_label,
+                        len(valid),
+                        len(skipped),
+                    )
+                    for lesson in skipped:
+                        if lesson.title not in logged_skips:
+                            logger.info(
+                                "Skip lezione '%s': durata=%s(%ss) progress=%s%% motivo=%s",
+                                lesson.title,
+                                lesson.duration_label,
+                                lesson.duration_seconds,
+                                lesson.progress,
+                                lesson.skip_reason,
+                            )
+                            logged_skips.add(lesson.title)
+                        if (
+                            resume_chapter_index == bounds.index
+                            and resume_title
+                            and lesson.title == resume_title
+                        ):
+                            logger.info(
+                                "Ripresa: la lezione registrata '%s' è stata rilevata tra gli skip (motivo: %s)",
+                                lesson.title,
+                                lesson.skip_reason,
+                            )
+                            resume_title = None
+                            resume_chapter_index = None
 
                 if config.diagnose:
                     if not lessons:
@@ -921,6 +1207,9 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                 rescan_requested = False
 
                 for lesson in valid:
+                    if watchdog:
+                        watchdog.raise_if_expired()
+                        watchdog.ping(f"lezione {lesson.title}")
                     exhausted_attempts = attempts.get(lesson.title, 0)
                     if exhausted_attempts >= config.max_lesson_attempts:
                         logger.warning(
@@ -955,7 +1244,7 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                             "Stop richiesto: uscita durante lezione '%s'",
                             lesson.title,
                         )
-                        return
+                        return False
                     logger.info(
                         "Riproduzione lezione '%s' durata=%s(%ss) progress=%s%%",
                         lesson.title,
@@ -972,12 +1261,21 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                     ):
                         logger.error("Impossibile click lezione '%s'", lesson.title)
                         continue
+                    try:
+                        await _human_like_scroll(
+                            page,
+                            logger,
+                            config,
+                            reason=f"inizio {lesson.title}",
+                        )
+                    except Exception:
+                        pass
                     state.chapter_index = bounds.index
                     state.chapter_title = bounds.title
                     state.lesson_title = lesson.title
                     state.save(config.state_file)
                     completed = await wait_for_lesson(
-                        lesson, config, logger, stop_event, page
+                        lesson, config, logger, stop_event, page, watchdog=watchdog
                     )
                     if completed:
                         logger.info("Lezione completata '%s'", lesson.title)
@@ -1004,7 +1302,7 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                         progress_made = True
 
                 if stop_event.is_set():
-                    return
+                    return False
                 if rescan_requested:
                     continue
                 if not progress_made:
@@ -1018,8 +1316,161 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                 resume_title = None
                 resume_chapter_index = None
     finally:
-        state.chapter_index = None
-        state.chapter_title = None
-        state.lesson_title = None
-        state.save(config.state_file)
-    logger.info("Corso completato")
+        _reset_state(state, config)
+    if stop_event.is_set():
+        return False
+    return True
+
+
+async def _verify_course_completion(
+    page: Page,
+    config: RuntimeConfig,
+    logger,
+    stop_event: asyncio.Event,
+    watchdog: Optional[ActivityWatchdog] = None,
+) -> VerificationResult:
+    chapters = await collect_chapter_bounds(page, logger, config)
+    if watchdog:
+        watchdog.raise_if_expired()
+        watchdog.ping("verifica capitoli")
+    incomplete: list[IncompleteLesson] = []
+    total_lessons = 0
+    completed = 0
+    for bounds in chapters:
+        chapter_label = _chapter_log_label(bounds)
+        if watchdog:
+            watchdog.raise_if_expired()
+            watchdog.ping(f"verifica {chapter_label}")
+        if stop_event.is_set():
+            logger.info(
+                "Verifica finale interrotta prima del capitolo %s per richiesta di stop",
+                chapter_label,
+            )
+            break
+        logger.info("Verifica finale: apertura capitolo %s", chapter_label)
+        click_desc = f"verifica capitolo {bounds.number or bounds.index}"
+        try:
+            await bounds.click_target.evaluate(
+                "el => {\n"
+                "  if (!el) { return; }\n"
+                "  el.scrollIntoView({ behavior: 'smooth', block: 'center' });\n"
+                "  window.scrollBy(0, -120);\n"
+                "}\n"
+            )
+            await asyncio.sleep(0.5)
+        except PlaywrightError:
+            pass
+        if not await click_with_retry(
+            bounds.click_target,
+            config,
+            logger,
+            description=click_desc,
+            page=page,
+        ):
+            logger.warning(
+                "Verifica finale: impossibile aprire il capitolo %s",
+                chapter_label,
+            )
+            continue
+        await asyncio.sleep(config.lesson_render_wait)
+        await _prime_chapter_content(page, bounds, logger, config)
+        bounds = await _refresh_chapter_bounds(page, bounds, logger)
+        lessons = await collect_lessons(page, bounds, logger, config)
+        if watchdog:
+            watchdog.ping(f"verifica lezioni {chapter_label}")
+        for lesson in lessons:
+            lowered = lesson.title.lower()
+            if any(keyword in lowered for keyword in TITLE_EXCLUSIONS):
+                continue
+            if lesson.skip_reason and not lesson.skip_reason.startswith("progress"):
+                continue
+            progress = lesson.progress if lesson.progress is not None else 0
+            total_lessons += 1
+            if progress >= config.progress_threshold:
+                completed += 1
+            else:
+                logger.warning(
+                    "Verifica finale: capitolo %s lezione '%s' incompleta (%s%%)",
+                    chapter_label,
+                    lesson.title,
+                    progress,
+                )
+                incomplete.append(
+                    IncompleteLesson(
+                        chapter_index=bounds.index,
+                        chapter_title=bounds.title,
+                        lesson_title=lesson.title,
+                        progress=progress,
+                    )
+                )
+    return VerificationResult(
+        total_chapters=len(chapters),
+        total_lessons=total_lessons,
+        completed_lessons=completed,
+        incomplete_lessons=incomplete,
+    )
+
+
+async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyncio.Event, state: LessonState) -> None:
+    effective_config = config
+    watchdog = ActivityWatchdog(
+        config.watchdog_timeout,
+        grace=config.watchdog_grace_attempts,
+        logger=logger,
+    )
+    watchdog.start(stop_event)
+    try:
+        while not stop_event.is_set():
+            watchdog.raise_if_expired()
+            watchdog.ping("passata principale")
+            logger.info("Avvio passata corso con start_chapter=%s", effective_config.start_chapter)
+            completed = await _run_course_once(
+                page, effective_config, logger, stop_event, state, watchdog=watchdog
+            )
+            if not completed:
+                return
+            if stop_event.is_set():
+                return
+            watchdog.ping("verifica finale")
+            logger.info("Passata principale completata, avvio verifica finale")
+            verification = await _verify_course_completion(
+                page, effective_config, logger, stop_event, watchdog=watchdog
+            )
+            if stop_event.is_set():
+                return
+            watchdog.raise_if_expired()
+            missing = verification.incomplete_lessons
+            logger.info(
+                "Lezioni totali trovate: %s | Completate: %s | Mancanti: %s",
+                verification.total_lessons,
+                verification.completed_lessons,
+                verification.total_lessons - verification.completed_lessons,
+            )
+            if not missing:
+                logger.info(
+                    "Verifica completata: tutte le lezioni sono state svolte (%s capitoli, %s lezioni totali).",
+                    verification.total_chapters,
+                    verification.total_lessons,
+                )
+                return
+            lowest = verification.lowest_incomplete
+            if lowest is None:
+                return
+            logger.warning(
+                "Verifica completata: lezioni mancanti rilevate (%s capitoli incompleti, %s lezioni da completare). Riavvio dal capitolo più basso con lezione mancante.",
+                len({item.chapter_index for item in missing}),
+                verification.missing_count,
+            )
+            logger.info(
+                "Riavvio dal capitolo %s ('%s') per riprendere dalla lezione '%s' (%s%%)",
+                lowest.chapter_index,
+                lowest.chapter_title,
+                lowest.lesson_title,
+                lowest.progress,
+            )
+            effective_config = effective_config.with_overrides(
+                start_chapter=lowest.chapter_index
+            )
+        logger.info("Stop richiesto durante il loop principale del corso")
+    finally:
+        await watchdog.stop()

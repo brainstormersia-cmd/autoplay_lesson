@@ -15,8 +15,17 @@ from playwright.async_api import (
 from .browser import launch_browser, open_page
 from .config import RuntimeConfig
 from .logging_utils import configure_logging
-from .lessons import run_course
+from .lessons import WatchdogExpired, run_course
 from .state import LessonState
+
+
+class CourseRecoveryError(RuntimeError):
+    """Raised when a full browser relaunch is required to recover the run."""
+
+    def __init__(self, message: str, *, cause: Exception | None = None) -> None:
+        super().__init__(message)
+        self.__cause__ = cause
+        self.cause = cause
 
 
 class Runner:
@@ -42,18 +51,193 @@ class Runner:
     async def run(self) -> None:
         self.logger.info("==== Avvio autoplay ====")
         self.logger.info(self.config.to_summary())
-        try:
-            async with launch_browser(self.config) as context:
-                await self._run_with_context(context)
-        except Exception as exc:  # pragma: no cover - defensive
-            self.logger.exception("Errore durante l'esecuzione: %s", exc)
-            raise
+        relaunch_attempt = 0
+        while not self.stop_event.is_set():
+            try:
+                async with launch_browser(self.config) as context:
+                    await self._run_with_context(context)
+                    return
+            except asyncio.CancelledError:
+                raise
+            except CourseRecoveryError as exc:
+                relaunch_attempt += 1
+                max_attempts = self.config.browser_restart_attempts
+                limit_label = max_attempts or "∞"
+                delay = self._browser_restart_delay(relaunch_attempt)
+                self.logger.warning(
+                    "Richiesto rilancio browser (tentativo %s/%s) dopo errore: %s",
+                    relaunch_attempt,
+                    limit_label,
+                    exc,
+                )
+                if max_attempts and relaunch_attempt > max_attempts:
+                    self.logger.exception(
+                        "Raggiunto il limite di rilanci browser (%s): interruzione",
+                        max_attempts,
+                    )
+                    raise exc
+                if delay > 0:
+                    try:
+                        await asyncio.sleep(delay)
+                    except asyncio.CancelledError:
+                        raise
+                continue
+            except Exception as exc:  # pragma: no cover - defensive
+                relaunch_attempt += 1
+                max_attempts = self.config.browser_restart_attempts
+                delay = self._browser_restart_delay(relaunch_attempt)
+                self.logger.exception(
+                    "Errore critico '%s' (tentativo browser %s/%s): %s",
+                    exc.__class__.__name__,
+                    relaunch_attempt,
+                    max_attempts or "∞",
+                    exc,
+                )
+                if max_attempts and relaunch_attempt > max_attempts:
+                    raise
+                if delay > 0:
+                    try:
+                        await asyncio.sleep(delay)
+                    except asyncio.CancelledError:
+                        raise
+                continue
+        self.logger.info("Stop richiesto prima dell'avvio del browser")
 
     async def _run_with_context(self, context: BrowserContext) -> None:
-        page = await open_page(context, self.config.url, timeout=self.config.navigation_timeout * 1000)
+        attempt = 0
+        page: Optional[Page] = None
+        loop = asyncio.get_running_loop()
+        page_opened_at: Optional[float] = None
+        try:
+            while not self.stop_event.is_set():
+                try:
+                    if page is None:
+                        page = await self._open_and_prepare_page(context)
+                        page_opened_at = loop.time()
+                    else:
+                        page_opened_at = getattr(page, "_autoplay_opened_at", None)
+                        if not isinstance(page_opened_at, (int, float)):
+                            page_opened_at = loop.time()
+                            setattr(page, "_autoplay_opened_at", page_opened_at)
+                        refresh_interval = self.config.page_refresh_interval
+                        if (
+                            refresh_interval
+                            and loop.time() - page_opened_at >= refresh_interval
+                        ):
+                            self.logger.info(
+                                "Refresh programmato dopo %.0fs: riapertura pagina",
+                                loop.time() - page_opened_at,
+                            )
+                            await self._close_page(page)
+                            page = await self._open_and_prepare_page(context)
+                            page_opened_at = loop.time()
+                    setattr(page, "_autoplay_opened_at", page_opened_at)
+                    await run_course(
+                        page, self.config, self.logger, self.stop_event, self.state
+                    )
+                    return
+                except (PlaywrightError, WatchdogExpired) as exc:
+                    if self.stop_event.is_set():
+                        self.logger.info(
+                            "Stop richiesto durante la gestione di un errore Playwright"
+                        )
+                        return
+                    attempt += 1
+                    if isinstance(exc, WatchdogExpired):
+                        label = "Watchdog"
+                    elif isinstance(exc, PlaywrightTimeoutError):
+                        label = "Timeout"
+                    else:
+                        label = "Errore"
+                    if attempt > self.config.course_restart_attempts:
+                        message = (
+                            f"{label} Playwright non recuperabile dopo {attempt} tentativi"
+                        )
+                        self.logger.exception("%s: %s", message, exc)
+                        raise CourseRecoveryError(message, cause=exc)
+                    delay = self._restart_delay(attempt)
+                    self.logger.warning(
+                        "%s Playwright rilevato (tentativo %s/%s): %s. Riavvio pagina tra %.1fs",
+                        label,
+                        attempt,
+                        self.config.course_restart_attempts,
+                        exc,
+                        delay,
+                    )
+                    await self._close_page(page)
+                    page = None
+                    page_opened_at = None
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # pragma: no cover - ultra defensive guard
+                    if self.stop_event.is_set():
+                        self.logger.info(
+                            "Stop richiesto durante la gestione di un errore inaspettato"
+                        )
+                        return
+                    attempt += 1
+                    label = exc.__class__.__name__
+                    if attempt > self.config.course_restart_attempts:
+                        message = (
+                            f"Errore inatteso {label} non recuperabile dopo {attempt} tentativi"
+                        )
+                        self.logger.exception("%s: %s", message, exc)
+                        raise CourseRecoveryError(message, cause=exc)
+                    delay = self._restart_delay(attempt)
+                    self.logger.exception(
+                        "Errore inatteso %s (tentativo %s/%s): %s. Riavvio pagina tra %.1fs",
+                        label,
+                        attempt,
+                        self.config.course_restart_attempts,
+                        exc,
+                        delay,
+                    )
+                    await self._close_page(page)
+                    page = None
+                    page_opened_at = None
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+            self.logger.info(
+                "Stop richiesto, interruzione del corso prima del prossimo tentativo"
+            )
+        finally:
+            await self._close_page(page)
+
+    async def _open_and_prepare_page(self, context: BrowserContext) -> Page:
+        page = await open_page(
+            context,
+            self.config.url,
+            timeout=int(self.config.navigation_timeout * 1000),
+        )
         self.logger.info("Pagina corrente: %s", page.url)
         await ensure_logged_in(page, self.config, self.logger)
-        await run_course(page, self.config, self.logger, self.stop_event, self.state)
+        return page
+
+    def _restart_delay(self, attempt: int) -> float:
+        if attempt <= 0:
+            return 0.0
+        delay = self.config.course_restart_base_delay * (
+            self.config.course_restart_backoff ** (attempt - 1)
+        )
+        return min(delay, self.config.course_restart_max_delay)
+
+    def _browser_restart_delay(self, attempt: int) -> float:
+        if attempt <= 0:
+            return 0.0
+        delay = self.config.browser_restart_base_delay * (
+            self.config.browser_restart_backoff ** (attempt - 1)
+        )
+        return min(delay, self.config.browser_restart_max_delay)
+
+    async def _close_page(self, page: Optional[Page]) -> None:
+        if page is None:
+            return
+        try:
+            await page.close()
+        except PlaywrightError as exc:
+            self.logger.debug("Errore durante la chiusura della pagina: %s", exc)
 
     def request_stop(self) -> None:
         if not self.stop_event.is_set():

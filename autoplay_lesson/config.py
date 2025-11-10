@@ -34,7 +34,7 @@ class RuntimeConfig:
     password: Optional[str] = None
     remember_me: bool = True
     after_play: int = 20
-    buffer: int = 5
+    buffer: int = 4
     max_wait: int = 3600
     stall_timeout: float = 120.0
     max_lesson_attempts: int = 2
@@ -63,6 +63,20 @@ class RuntimeConfig:
     click_timeout: float = 3.0
     navigation_timeout: float = 60.0
     page_timeout: float = 30.0
+    course_restart_attempts: int = 3
+    course_restart_base_delay: float = 15.0
+    course_restart_backoff: float = 2.0
+    course_restart_max_delay: float = 180.0
+    page_refresh_interval: Optional[float] = 9000.0
+    lesson_scroll_interval: float = 45.0
+    lesson_scroll_distance: int = 420
+    lesson_scroll_jitter: int = 120
+    watchdog_timeout: float = 300.0
+    watchdog_grace_attempts: int = 1
+    browser_restart_attempts: int = 0
+    browser_restart_base_delay: float = 60.0
+    browser_restart_backoff: float = 2.0
+    browser_restart_max_delay: float = 900.0
 
     def to_summary(self) -> str:
         """Return a multi-line summary describing this configuration."""
@@ -81,6 +95,12 @@ class RuntimeConfig:
             f"  Tempo massimo per lezione: {self.max_wait}s\n"
             f"  Timeout stallo lezione: {self.stall_timeout}s\n"
             f"  Tentativi per lezione: {self.max_lesson_attempts}\n"
+            f"  Tentativi riavvio corso: {self.course_restart_attempts}\n"
+            f"  Delay riavvio corso: base={self.course_restart_base_delay}s max={self.course_restart_max_delay}s\n"
+            f"  Tentativi riavvio browser: {self.browser_restart_attempts or 'illimitati'}\n"
+            f"  Delay riavvio browser: base={self.browser_restart_base_delay}s max={self.browser_restart_max_delay}s\n"
+            f"  Watchdog inattività: timeout={self.watchdog_timeout}s grace={self.watchdog_grace_attempts}\n"
+            f"  Refresh pagina programmato: {self.page_refresh_interval or 'disattivato'}s\n"
             f"  Start chapter: {self.start_chapter or '-'}\n"
             f"  End chapter: {self.end_chapter or '-'}\n"
             f"  Render wait capitolo: {self.lesson_render_wait}s\n"
