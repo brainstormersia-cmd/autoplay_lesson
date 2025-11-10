@@ -7,18 +7,35 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-from playwright.async_api import Error as PlaywrightError, Locator, Page
+from playwright.async_api import (
+    Error as PlaywrightError,
+    Locator,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from .config import DURATION_PATTERN, RuntimeConfig
 from .state import LessonState
 
 TITLE_EXCLUSIONS = ("test di fine lezione", "dispensa", "obiettivi")
-LESSON_ROW_SELECTOR = "div.border-t.hover\\:bg-platform-hover-light, div.border-t.hover\\:bg-platform-hover-light.bg-platform-hover-light"
-TITLE_SELECTOR = ":scope .text-base .mb-2, :scope div.mb-2, :scope span.font-semibold, :scope div.font-semibold"
-DURATION_SELECTOR = ":scope .text-sm.text-platform-gray, :scope span.text-sm, :scope span.text-xs"
-PERCENTAGE_SELECTOR = ":scope .w-1\\/12.text-xs.md\\:text-xs, :scope span.text-xs, :scope span.text-sm"
+LESSON_ROW_SELECTOR = ":scope div.border-t.hover\\:bg-platform-hover-light"
+TITLE_SELECTOR = ":scope div.mb-2, :scope span.font-semibold, :scope .text-base .mb-2, :scope div.font-semibold, :scope h3, :scope h4"
+DURATION_SELECTOR = ":scope div.text-sm.text-platform-gray, :scope span.text-sm, :scope span.text-xs"
+PERCENTAGE_SELECTOR = (
+    ":scope div.w-1\\/12.text-xs, :scope div.w-1\\/12.md\\:text-xs, :scope span.text-xs, :scope span.text-sm"
+)
 PROGRESS_COMPLETE_SELECTOR = ":scope .bg-platform-green[style*='width: 100%'], :scope .bg-platform-primary[style*='width: 100%']"
-CHAPTER_HEADER_SELECTOR = "div.bg-white.text-base.border > div.cursor-pointer, div.bg-white.text-base.border div.cursor-pointer, div.flex.items-center.font-medium"
+CHAPTER_CONTAINER_SELECTOR = "div.bg-white.text-base.border.font-sans.font-semibold"
+CHAPTER_HEADER_SELECTOR = (
+    "div.bg-white.text-base.border div.cursor-pointer, "
+    "div.bg-white.text-base.border svg + div, "
+    "div.bg-white.text-base.border:has(svg), "
+    "div.bg-white.text-base.border div[role='button'], "
+    "div.flex.items-center.font-medium:has(svg)"
+)
+VIDEO_BLOCK_HEADER_TEXT = "Riproduzione del video non consentita"
+VIDEO_BLOCK_HEADER_SELECTOR = "h3.text-2xl.font-medium.mt-4.whitespace-pre-line"
+VIDEO_BLOCK_CONFIRM_SELECTOR = "button.bg-platform-primary.text-white"
 
 
 def _selector(config: RuntimeConfig, key: str, default: str) -> str:
@@ -61,6 +78,14 @@ def _chapter_contains_number(title: str, target: int) -> bool:
 def _find_start_chapter_index(
     chapters: list["ChapterBounds"], target: int, logger
 ) -> Optional[int]:
+    if 1 <= target <= len(chapters):
+        bounds = chapters[target - 1]
+        logger.info(
+            "Capitolo iniziale %s -> match per indice con '%s'",
+            target,
+            _chapter_log_label(bounds),
+        )
+        return target - 1
     exact: list[int] = []
     partial: list[int] = []
     for idx, bounds in enumerate(chapters):
@@ -126,7 +151,8 @@ def _estimate_remaining_seconds(
 class ChapterBounds:
     index: int  # 1-based for logging
     title: str
-    locator: Locator
+    container: Locator
+    click_target: Locator
     y_min: float
     y_max: float
     number: Optional[int]
@@ -173,19 +199,76 @@ async def ensure_cookies(page: Page, logger) -> None:
             continue
 
 
+async def dismiss_video_restriction_popup(page: Page, config: RuntimeConfig, logger) -> bool:
+    """Automatically close the video restriction popup if it appears."""
+
+    try:
+        header = page.locator(
+            f"{VIDEO_BLOCK_HEADER_SELECTOR}:has-text('{VIDEO_BLOCK_HEADER_TEXT}')"
+        )
+    except PlaywrightError:
+        return False
+    try:
+        if not await header.count():
+            return False
+    except PlaywrightError:
+        return False
+
+    logger.warning("Popup 'Riproduzione del video non consentita' rilevato")
+
+    button = page.locator(
+        f"{VIDEO_BLOCK_CONFIRM_SELECTOR}:has-text('OK')"
+    )
+    try:
+        if await button.count():
+            try:
+                await button.first.click(timeout=int(config.click_timeout * 1000))
+                try:
+                    await page.wait_for_load_state(
+                        "networkidle", timeout=int(config.navigation_timeout * 1000)
+                    )
+                except PlaywrightTimeoutError:
+                    logger.debug(
+                        "Timeout durante l'attesa del reload dopo il popup di blocco video"
+                    )
+                await page.wait_for_timeout(500)
+                return True
+            except PlaywrightError as exc:
+                logger.error(
+                    "Errore durante la chiusura del popup di blocco video: %s", exc
+                )
+        else:
+            logger.error(
+                "Bottone 'OK' non trovato nel popup di blocco video"
+            )
+    except PlaywrightError as exc:
+        logger.error(
+            "Errore nel rilevamento del bottone del popup di blocco video: %s", exc
+        )
+    return False
+
+
 async def collect_chapter_bounds(page: Page, logger, config: RuntimeConfig) -> list[ChapterBounds]:
-    headers = page.locator(_selector(config, "chapter_header", CHAPTER_HEADER_SELECTOR))
-    count = await headers.count()
+    containers = page.locator(
+        _selector(config, "chapter_container", CHAPTER_CONTAINER_SELECTOR)
+    )
+    count = await containers.count()
     results: list[ChapterBounds] = []
 
     for idx in range(count):
-        locator = headers.nth(idx)
+        container = containers.nth(idx)
+        header_locator = container.locator(
+            _selector(config, "chapter_header", CHAPTER_HEADER_SELECTOR)
+        )
+        header_count = await header_locator.count()
+        click_target = header_locator.first if header_count else container
+        title_source = header_locator.first if header_count else click_target
         try:
-            title = (await locator.inner_text()).strip()
+            title = (await title_source.inner_text()).strip()
         except PlaywrightError:
             title = f"Capitolo {idx + 1}"
         try:
-            bbox = await locator.bounding_box()
+            bbox = await container.bounding_box()
         except PlaywrightError:
             bbox = None
         y_min = bbox["y"] if bbox else float("nan")
@@ -194,16 +277,29 @@ async def collect_chapter_bounds(page: Page, logger, config: RuntimeConfig) -> l
             ChapterBounds(
                 index=idx + 1,
                 title=title,
-                locator=locator,
+                container=container,
+                click_target=click_target,
                 y_min=y_min,
                 y_max=y_max,
                 number=_extract_chapter_number(title),
             )
         )
 
-    for current, nxt in zip(results, results[1:]):
-        current.y_max = nxt.y_min if not math.isnan(nxt.y_min) else float("inf")
-
+    for idx, current in enumerate(results):
+        if idx < len(results) - 1:
+            nxt = results[idx + 1]
+            next_min = nxt.y_min
+            if math.isnan(next_min):
+                current.y_max = float("inf")
+            else:
+                current.y_max = next_min - 15
+        else:
+            current.y_max = float("inf")
+        if not math.isnan(current.y_min):
+            if math.isnan(current.y_max):
+                current.y_max = float("inf")
+            if current.y_max - current.y_min < 200:
+                current.y_max = current.y_min + 400
     return results
 
 
@@ -236,11 +332,42 @@ async def _extract_percentage(row: Locator, config: RuntimeConfig) -> Optional[i
     except PlaywrightError:
         pass
     try:
+        aria_locator = row.locator(
+            ":scope [role='progressbar'][aria-valuenow]"
+        )
+        for idx in range(await aria_locator.count()):
+            try:
+                value = await aria_locator.nth(idx).get_attribute("aria-valuenow")
+            except PlaywrightError:
+                continue
+            if not value:
+                continue
+            try:
+                return int(value)
+            except ValueError:
+                continue
+    except PlaywrightError:
+        pass
+    try:
         complete_locator = row.locator(
             _selector(config, "progress_complete", PROGRESS_COMPLETE_SELECTOR)
         )
         if await complete_locator.count():
             return 100
+    except PlaywrightError:
+        pass
+    try:
+        width_locator = row.locator(":scope [style*='width']")
+        for idx in range(await width_locator.count()):
+            try:
+                style = await width_locator.nth(idx).get_attribute("style")
+            except PlaywrightError:
+                continue
+            if not style:
+                continue
+            match = re.search(r"width\s*:\s*(\d{1,3})%", style)
+            if match:
+                return int(match.group(1))
     except PlaywrightError:
         pass
     text_hint = None
@@ -289,8 +416,13 @@ def _duration_to_seconds(match: re.Match[str]) -> int:
 
 
 async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: RuntimeConfig) -> list[LessonCandidate]:
-    rows = page.locator(_selector(config, "lesson_row", LESSON_ROW_SELECTOR))
+    rows = bounds.container.locator(
+        _selector(config, "lesson_row", LESSON_ROW_SELECTOR)
+    )
     results: list[LessonCandidate] = []
+    title_matches = 0
+    duration_matches = 0
+    progress_matches = 0
     count = await rows.count()
     chapter_label = _chapter_log_label(bounds)
     logger.info(
@@ -322,8 +454,14 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
                 title_raw = (await row.inner_text(timeout=750)).strip()
             except PlaywrightError:
                 title_raw = ""
+        if title_raw:
+            title_matches += 1
         duration_label, duration_seconds = await _extract_duration(row, config)
+        if duration_label:
+            duration_matches += 1
         progress = await _extract_percentage(row, config)
+        if progress is not None:
+            progress_matches += 1
         skip_reason = _title_skip_reason(title_raw, progress, config)
         candidate = LessonCandidate(
             title=title_raw,
@@ -336,11 +474,99 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
             skip_reason=skip_reason,
         )
         results.append(candidate)
+    if config.diagnose and count:
+        logger.info(
+            "Diagnostica selettori capitolo %s: titoli=%s/%s durate=%s progressi=%s",
+            chapter_label,
+            title_matches,
+            count,
+            duration_matches,
+            progress_matches,
+        )
     return results
 
 
-async def click_with_retry(locator: Locator, config: RuntimeConfig, logger, *, description: str) -> bool:
+async def _ensure_scroll_into_view(locator: Locator, timeout_ms: int) -> None:
+    try:
+        await locator.scroll_into_view_if_needed(timeout=timeout_ms)
+        return
+    except PlaywrightError:
+        pass
+    try:
+        await locator.evaluate(
+            "el => el.scrollIntoView({behavior: 'instant', block: 'center', inline: 'nearest'})"
+        )
+    except PlaywrightError:
+        pass
+
+
+async def _prime_chapter_content(
+    page: Page, bounds: ChapterBounds, logger
+) -> None:
+    try:
+        label = _chapter_log_label(bounds)
+    except Exception:  # pragma: no cover - defensive logging
+        label = f"#{bounds.index}"
+    logger.debug("Scroll esplorativo capitolo %s", label)
+    try:
+        await bounds.container.scroll_into_view_if_needed(timeout=750)
+    except PlaywrightError:
+        pass
+    try:
+        await bounds.container.evaluate("el => { if (el) el.scrollTop = 0; }")
+    except PlaywrightError:
+        pass
+    steps = [600, 600, 600, -600, -600]
+    for delta in steps:
+        container_scrolled = False
+        try:
+            container_scrolled = await bounds.container.evaluate(
+                "(el, amount) => {\n"
+                "  if (!el) { return false; }\n"
+                "  const max = (el.scrollHeight || 0) - (el.clientHeight || 0);\n"
+                "  if (max <= 0) { return false; }\n"
+                "  const next = Math.min(Math.max(el.scrollTop + amount, 0), max);\n"
+                "  if (Math.abs(next - el.scrollTop) < 1) {\n"
+                "    el.scrollTop = next;\n"
+                "    return false;\n"
+                "  }\n"
+                "  el.scrollTop = next;\n"
+                "  return true;\n"
+                "}",
+                delta,
+            )
+        except PlaywrightError:
+            container_scrolled = False
+        if not container_scrolled:
+            try:
+                await page.mouse.wheel(0, delta)
+            except PlaywrightError:
+                break
+        try:
+            await page.wait_for_timeout(200)
+        except PlaywrightError:
+            break
+
+
+async def click_with_retry(
+    locator: Locator,
+    config: RuntimeConfig,
+    logger,
+    *,
+    description: str,
+    page: Optional[Page] = None,
+) -> bool:
+    timeout_ms = int(config.click_timeout * 1000)
     for attempt in range(1, config.max_retries + 1):
+        try:
+            await locator.wait_for(state="attached", timeout=timeout_ms)
+        except PlaywrightError:
+            pass
+        await _ensure_scroll_into_view(locator, timeout_ms)
+        try:
+            await locator.wait_for(state="visible", timeout=timeout_ms)
+        except PlaywrightError:
+            pass
         try:
             await locator.click(timeout=config.click_timeout * 1000)
             logger.info("Click %s tentativo %s/%s: OK", description, attempt, config.max_retries)
@@ -355,6 +581,17 @@ async def click_with_retry(locator: Locator, config: RuntimeConfig, logger, *, d
                 exc,
                 delay,
             )
+            if page is not None:
+                try:
+                    await page.wait_for_timeout(150)
+                except PlaywrightError:
+                    pass
+                if attempt < config.max_retries:
+                    try:
+                        await page.keyboard.press("Home")
+                        await page.wait_for_timeout(100)
+                    except PlaywrightError:
+                        pass
             if attempt < config.max_retries:
                 await asyncio.sleep(delay)
     return False
@@ -365,6 +602,7 @@ async def wait_for_lesson(
     config: RuntimeConfig,
     logger,
     stop_event: asyncio.Event,
+    page: Page,
 ) -> bool:
     base = config.after_play
     residual = max(0, (candidate.duration_seconds or 0) - base)
@@ -382,7 +620,17 @@ async def wait_for_lesson(
     start_time = loop.time()
     absolute_deadline = start_time + config.max_wait
     deadline = min(start_time + planned_total, absolute_deadline)
+    if await dismiss_video_restriction_popup(page, config, logger):
+        logger.info(
+            "Popup blocco video gestito all'avvio della lezione, attendo il render"
+        )
+        await asyncio.sleep(config.lesson_render_wait)
     await _sleep_with_stop(stop_event, base)
+    if await dismiss_video_restriction_popup(page, config, logger):
+        logger.info(
+            "Popup blocco video gestito, attendo nuovamente il render della lezione"
+        )
+        await asyncio.sleep(config.lesson_render_wait)
     if stop_event.is_set():
         logger.info("Attesa interrotta per richiesta di stop")
         return False
@@ -415,6 +663,13 @@ async def wait_for_lesson(
             continue
         except asyncio.TimeoutError:
             pass
+        if await dismiss_video_restriction_popup(page, config, logger):
+            logger.info(
+                "Popup blocco video gestito durante l'attesa, proseguo dopo il render"
+            )
+            await asyncio.sleep(config.lesson_render_wait)
+            deadline = min(deadline + config.lesson_render_wait, absolute_deadline)
+            continue
         current_progress = await _extract_percentage(candidate.locator, config)
         if current_progress is None:
             logger.debug(
@@ -512,13 +767,87 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                 continue
             logger.info("Apri capitolo %s", chapter_label)
             click_desc = f"capitolo {bounds.number or bounds.index}"
-            if not await click_with_retry(bounds.locator, config, logger, description=click_desc):
-                logger.error("Impossibile aprire capitolo %s", chapter_label)
-                continue
+            try:
+                await bounds.click_target.evaluate(
+                    "el => {\n"
+                    "  if (!el) { return; }\n"
+                    "  el.scrollIntoView({ behavior: 'smooth', block: 'center' });\n"
+                    "  window.scrollBy(0, -120);\n"
+                    "}"
+                )
+                await asyncio.sleep(0.7)
+            except PlaywrightError:
+                if page is not None:
+                    try:
+                        await page.evaluate(
+                            "el => {\n"
+                            "  if (!el) { return; }\n"
+                            "  el.scrollIntoView({ behavior: 'instant', block: 'center' });\n"
+                            "  window.scrollBy(0, -120);\n"
+                            "}",
+                            await bounds.click_target.element_handle(),
+                        )
+                        await asyncio.sleep(0.3)
+                    except PlaywrightError:
+                        pass
+            if not await click_with_retry(
+                bounds.click_target,
+                config,
+                logger,
+                description=click_desc,
+                page=page,
+            ):
+                fallback_title = bounds.title.split("-", 1)[-1].strip() or bounds.title.strip()
+                if fallback_title and page is not None:
+                    logger.info(
+                        "Fallback click capitolo %s usando testo '%s'",
+                        chapter_label,
+                        fallback_title,
+                    )
+                    text_locator = page.locator(
+                        f"text=/{re.escape(fallback_title)}/i"
+                    ).first
+                    if await text_locator.count():
+                        if await click_with_retry(
+                            text_locator,
+                            config,
+                            logger,
+                            description=f"{click_desc} fallback",
+                            page=page,
+                        ):
+                            logger.info(
+                                "Click fallback capitolo %s riuscito",
+                                chapter_label,
+                            )
+                        else:
+                            logger.error(
+                                "Impossibile aprire capitolo %s anche con fallback testo",
+                                chapter_label,
+                            )
+                            continue
+                    else:
+                        logger.error(
+                            "Fallback testo per capitolo %s non trovato", chapter_label
+                        )
+                        continue
+                else:
+                    logger.error("Impossibile aprire capitolo %s", chapter_label)
+                    continue
             logger.info(
                 "Attesa %ss per render capitolo %s", config.lesson_render_wait, chapter_label
             )
             await asyncio.sleep(config.lesson_render_wait)
+            try:
+                await bounds.container.evaluate("el => el && el.offsetHeight")
+                new_bbox = await bounds.container.bounding_box()
+            except PlaywrightError:
+                new_bbox = None
+            if new_bbox:
+                bounds.y_min = new_bbox.get("y", bounds.y_min)
+                height = new_bbox.get("height")
+                if height is not None:
+                    bounds.y_max = bounds.y_min + height + 300
+            await _prime_chapter_content(page, bounds, logger)
 
             attempts: dict[str, int] = {}
             logged_skips: set[str] = set()
@@ -635,7 +964,11 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                         lesson.progress,
                     )
                     if not await click_with_retry(
-                        lesson.locator, config, logger, description="lezione"
+                        lesson.locator,
+                        config,
+                        logger,
+                        description="lezione",
+                        page=page,
                     ):
                         logger.error("Impossibile click lezione '%s'", lesson.title)
                         continue
@@ -644,7 +977,7 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                     state.lesson_title = lesson.title
                     state.save(config.state_file)
                     completed = await wait_for_lesson(
-                        lesson, config, logger, stop_event
+                        lesson, config, logger, stop_event, page
                     )
                     if completed:
                         logger.info("Lezione completata '%s'", lesson.title)
