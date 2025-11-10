@@ -10,7 +10,18 @@ from typing import Optional
 
 from pathlib import Path
 
-from .config import DEFAULT_USER_DATA_DIR, RuntimeConfig
+from .config import (
+    DEFAULT_USER_DATA_DIR,
+    PersistentSettings,
+    RuntimeConfig,
+    clear_persistent_settings,
+    delete_password,
+    keyring_available,
+    load_persistent_settings,
+    load_saved_password,
+    save_password,
+    save_persistent_settings,
+)
 from .runner import Runner
 
 
@@ -24,6 +35,10 @@ class AutoplayApp:
         self._thread: Optional[threading.Thread] = None
         self._log_queue: "queue.Queue[str]" = queue.Queue(maxsize=500)
 
+        self._settings = load_persistent_settings()
+        self._stored_username = self._settings.username
+        self._stored_password = load_saved_password(self._settings.username) if self._settings.remember_me else None
+
         self._build_form()
         self._build_log()
         self._poll_log_queue()
@@ -34,18 +49,23 @@ class AutoplayApp:
         for column in range(2):
             frame.columnconfigure(column, weight=1)
 
-        self.url_var = tk.StringVar()
-        self.start_var = tk.StringVar()
-        self.headless_var = tk.BooleanVar(value=False)
-        self.after_play_var = tk.IntVar(value=20)
-        self.buffer_var = tk.IntVar(value=5)
-        self.slow_var = tk.IntVar(value=0)
-        self.chrome_profile_var = tk.BooleanVar(value=True)
-        self.profile_path_var = tk.StringVar(value=str(DEFAULT_USER_DATA_DIR))
-        self.diagnose_var = tk.BooleanVar(value=False)
+        self.url_var = tk.StringVar(value=self._settings.url)
+        self.username_var = tk.StringVar(value=self._settings.username)
+        self.password_var = tk.StringVar(value=self._stored_password or "")
+        self.start_var = tk.StringVar(value=str(self._settings.start_chapter or ""))
+        self.headless_var = tk.BooleanVar(value=self._settings.headless)
+        self.after_play_var = tk.IntVar(value=self._settings.after_play)
+        self.buffer_var = tk.IntVar(value=self._settings.buffer)
+        self.slow_var = tk.IntVar(value=self._settings.slow_mo)
+        self.chrome_profile_var = tk.BooleanVar(value=self._settings.use_chrome_profile)
+        self.profile_path_var = tk.StringVar(value=self._settings.user_data_dir or str(DEFAULT_USER_DATA_DIR))
+        self.diagnose_var = tk.BooleanVar(value=self._settings.diagnose)
+        self.remember_var = tk.BooleanVar(value=self._settings.remember_me)
 
         self._add_labeled_entry(frame, "URL", self.url_var, row=0)
-        self._add_labeled_entry(frame, "Capitolo iniziale", self.start_var, row=1)
+        self._add_labeled_entry(frame, "Username", self.username_var, row=1)
+        self._add_labeled_entry(frame, "Password", self.password_var, row=2, show="*")
+        self._add_labeled_entry(frame, "Capitolo iniziale", self.start_var, row=3)
 
         tk.Label(frame, text="Headless").grid(row=0, column=2, padx=6, pady=4, sticky="w")
         tk.Checkbutton(frame, variable=self.headless_var).grid(row=0, column=3, sticky="w")
@@ -53,16 +73,19 @@ class AutoplayApp:
         tk.Label(frame, text="Usa profilo Chrome").grid(row=1, column=2, padx=6, pady=4, sticky="w")
         tk.Checkbutton(frame, variable=self.chrome_profile_var, command=self._toggle_profile_entry).grid(row=1, column=3, sticky="w")
 
-        self._add_labeled_spin(frame, "After-play (s)", self.after_play_var, row=2)
-        self._add_labeled_spin(frame, "Buffer (s)", self.buffer_var, row=3)
-        self._add_labeled_spin(frame, "Slow (ms)", self.slow_var, row=4, step=50, max_value=2000)
+        tk.Label(frame, text="Ricordami").grid(row=2, column=2, padx=6, pady=4, sticky="w")
+        tk.Checkbutton(frame, variable=self.remember_var).grid(row=2, column=3, sticky="w")
 
-        tk.Label(frame, text="Diagnostica").grid(row=2, column=2, padx=6, pady=4, sticky="w")
-        tk.Checkbutton(frame, variable=self.diagnose_var).grid(row=2, column=3, sticky="w")
+        self._add_labeled_spin(frame, "After-play (s)", self.after_play_var, row=4)
+        self._add_labeled_spin(frame, "Buffer (s)", self.buffer_var, row=5)
+        self._add_labeled_spin(frame, "Slow (ms)", self.slow_var, row=6, step=50, max_value=2000)
 
-        tk.Label(frame, text="Cartella profilo Chrome").grid(row=5, column=0, padx=6, pady=4, sticky="w")
+        tk.Label(frame, text="Diagnostica").grid(row=3, column=2, padx=6, pady=4, sticky="w")
+        tk.Checkbutton(frame, variable=self.diagnose_var).grid(row=3, column=3, sticky="w")
+
+        tk.Label(frame, text="Cartella profilo Chrome").grid(row=7, column=0, padx=6, pady=4, sticky="w")
         self.profile_entry = tk.Entry(frame, textvariable=self.profile_path_var)
-        self.profile_entry.grid(row=5, column=1, columnspan=3, padx=6, pady=4, sticky="we")
+        self.profile_entry.grid(row=7, column=1, columnspan=3, padx=6, pady=4, sticky="we")
         self._toggle_profile_entry()
 
         buttons = tk.Frame(self.root)
@@ -76,9 +99,17 @@ class AutoplayApp:
         state = tk.NORMAL if self.chrome_profile_var.get() else tk.DISABLED
         self.profile_entry.configure(state=state)
 
-    def _add_labeled_entry(self, parent: tk.Widget, label: str, variable: tk.StringVar, *, row: int) -> None:
+    def _add_labeled_entry(
+        self,
+        parent: tk.Widget,
+        label: str,
+        variable: tk.StringVar,
+        *,
+        row: int,
+        show: Optional[str] = None,
+    ) -> None:
         tk.Label(parent, text=label).grid(row=row, column=0, padx=6, pady=4, sticky="w")
-        entry = tk.Entry(parent, textvariable=variable)
+        entry = tk.Entry(parent, textvariable=variable, show=show)
         entry.grid(row=row, column=1, padx=6, pady=4, sticky="we")
 
     def _add_labeled_spin(
@@ -132,10 +163,16 @@ class AutoplayApp:
             messagebox.showerror("Autoplay", "Capitolo iniziale deve essere un numero")
             return
 
+        username = self.username_var.get().strip()
+        password = self.password_var.get()
+        remember_me = self.remember_var.get()
         profile_path = self.profile_path_var.get().strip()
 
         config = RuntimeConfig(
             url=url,
+            username=username or None,
+            password=password or None,
+            remember_me=remember_me,
             headless=self.headless_var.get(),
             start_chapter=start_chapter,
             after_play=self.after_play_var.get(),
@@ -145,6 +182,8 @@ class AutoplayApp:
             user_data_dir=Path(profile_path) if profile_path else DEFAULT_USER_DATA_DIR,
             diagnose=self.diagnose_var.get(),
         )
+
+        self._persist_preferences(config, password)
 
         self._runner = Runner(config, log_queue=self._log_queue)
         self.start_button.configure(state=tk.DISABLED)
@@ -171,6 +210,50 @@ class AutoplayApp:
             return
         self._runner.request_stop()
         self.stop_button.configure(state=tk.DISABLED)
+
+    def _persist_preferences(self, config: RuntimeConfig, password: Optional[str]) -> None:
+        previous_username = self._stored_username
+        if config.remember_me:
+            settings = PersistentSettings(
+                url=config.url,
+                username=config.username or "",
+                user_data_dir=str(config.user_data_dir or DEFAULT_USER_DATA_DIR),
+                remember_me=True,
+                headless=config.headless,
+                use_chrome_profile=config.use_chrome_profile,
+                after_play=config.after_play,
+                buffer=config.buffer,
+                slow_mo=config.slow_mo,
+                diagnose=config.diagnose,
+                start_chapter=config.start_chapter,
+            )
+            save_persistent_settings(settings)
+            self._settings = settings
+            if password and config.username:
+                if not save_password(config.username, password):
+                    if not keyring_available():
+                        self._log_queue.put(
+                            "Keyring non disponibile: la password non verrà salvata."
+                        )
+                    else:
+                        self._log_queue.put(
+                            "Impossibile salvare la password nel keyring."
+                        )
+                else:
+                    self._stored_password = password
+            else:
+                delete_password(config.username or "")
+                self._stored_password = None
+        else:
+            clear_persistent_settings()
+            delete_password(config.username or "")
+            if self._stored_username and self._stored_username != (config.username or ""):
+                delete_password(self._stored_username)
+            self._settings = PersistentSettings(remember_me=False)
+            self._stored_password = None
+        self._stored_username = config.username or ""
+        if previous_username and previous_username != self._stored_username:
+            delete_password(previous_username)
 
 
 def launch_gui() -> None:
