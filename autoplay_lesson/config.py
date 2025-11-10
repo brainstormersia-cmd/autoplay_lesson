@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Sequence
@@ -35,6 +36,8 @@ class RuntimeConfig:
     after_play: int = 20
     buffer: int = 5
     max_wait: int = 3600
+    stall_timeout: float = 120.0
+    max_lesson_attempts: int = 2
     headless: bool = False
     start_chapter: Optional[int] = None
     end_chapter: Optional[int] = None
@@ -76,6 +79,8 @@ class RuntimeConfig:
             f"  Attesa post play: {self.after_play}s\n"
             f"  Buffer aggiuntivo: {self.buffer}s\n"
             f"  Tempo massimo per lezione: {self.max_wait}s\n"
+            f"  Timeout stallo lezione: {self.stall_timeout}s\n"
+            f"  Tentativi per lezione: {self.max_lesson_attempts}\n"
             f"  Start chapter: {self.start_chapter or '-'}\n"
             f"  End chapter: {self.end_chapter or '-'}\n"
             f"  Render wait capitolo: {self.lesson_render_wait}s\n"
@@ -92,10 +97,13 @@ class RuntimeConfig:
             summary += f"  Override selettori: {overrides}\n"
         return summary
 
-    def chapter_in_scope(self, index: int) -> bool:
-        if self.start_chapter is not None and index < self.start_chapter:
+    def chapter_in_scope(self, index: int, *, number: Optional[int] = None) -> bool:
+        """Return True if the chapter identified by ``index``/``number`` is in scope."""
+
+        reference = number if number is not None else index
+        if self.start_chapter is not None and reference < self.start_chapter:
             return False
-        if self.end_chapter is not None and index > self.end_chapter:
+        if self.end_chapter is not None and reference > self.end_chapter:
             return False
         return True
 
@@ -104,6 +112,19 @@ class RuntimeConfig:
 
 
 DEFAULTS = RuntimeConfig(url="https://esempio-corso")
+
+
+def _encode_password(password: str) -> str:
+    return urlsafe_b64encode(password.encode("utf-8")).decode("ascii")
+
+
+def _decode_password(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        return urlsafe_b64decode(value.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 @dataclass(slots=True)
@@ -121,6 +142,13 @@ class PersistentSettings:
     slow_mo: int = DEFAULTS.slow_mo
     diagnose: bool = False
     start_chapter: Optional[int] = None
+    password_b64: Optional[str] = None
+
+    def set_password(self, password: Optional[str]) -> None:
+        self.password_b64 = _encode_password(password) if password else None
+
+    def get_password(self) -> Optional[str]:
+        return _decode_password(self.password_b64)
 
     def to_dict(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -137,6 +165,8 @@ class PersistentSettings:
         }
         if self.start_chapter is not None:
             data["start_chapter"] = self.start_chapter
+        if self.password_b64:
+            data["password_b64"] = self.password_b64
         return data
 
     @classmethod
@@ -149,6 +179,9 @@ class PersistentSettings:
                 start_chapter = None
         elif not isinstance(start_chapter, int):
             start_chapter = None
+        password_raw = data.get("password_b64")
+        password_b64 = str(password_raw) if isinstance(password_raw, str) and password_raw else None
+
         return cls(
             url=str(data.get("url", "")),
             username=str(data.get("username", "")),
@@ -161,6 +194,7 @@ class PersistentSettings:
             slow_mo=int(data.get("slow_mo", DEFAULTS.slow_mo)),
             diagnose=bool(data.get("diagnose", False)),
             start_chapter=start_chapter,
+            password_b64=password_b64,
         )
 
 
@@ -260,6 +294,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
     parser.add_argument("--after-play", type=int, default=DEFAULTS.after_play, help="Attesa iniziale dopo il click play")
     parser.add_argument("--buffer", type=int, default=DEFAULTS.buffer, help="Buffer extra dopo la durata nominale")
     parser.add_argument("--max-wait", type=int, default=DEFAULTS.max_wait, help="Tempo massimo per singola lezione")
+    parser.add_argument("--stall-timeout", type=float, default=DEFAULTS.stall_timeout, help="Secondi senza progresso prima di forzare il riavvio")
+    parser.add_argument("--lesson-attempts", type=int, default=DEFAULTS.max_lesson_attempts, help="Tentativi massimi per la stessa lezione")
     parser.add_argument("--headless", action="store_true", help="Esegue in modalità headless")
     parser.add_argument("--start-chapter", type=int, help="Capitolo di partenza (1-based)")
     parser.add_argument("--end-chapter", type=int, help="Capitolo di termine (1-based)")
@@ -304,6 +340,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
     password = args.password
     if not password and username:
         password = load_saved_password(username)
+        if not password:
+            password = settings.get_password()
 
     start_chapter = args.start_chapter
     if start_chapter is None:
@@ -336,6 +374,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
         after_play=after_play,
         buffer=buffer,
         max_wait=args.max_wait,
+        stall_timeout=max(args.stall_timeout, 0),
+        max_lesson_attempts=max(1, args.lesson_attempts),
         headless=headless,
         start_chapter=start_chapter,
         end_chapter=args.end_chapter,

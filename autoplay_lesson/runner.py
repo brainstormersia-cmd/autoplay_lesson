@@ -25,7 +25,19 @@ class Runner:
         setup = configure_logging(config, log_queue=log_queue)
         self.logger = setup.logger
         self.stop_event = asyncio.Event()
-        self.state = LessonState.load(config.state_file)
+        loaded_state = LessonState.load(config.state_file)
+        if config.start_chapter is not None and (
+            loaded_state.chapter_index is not None
+            or loaded_state.lesson_title is not None
+            or loaded_state.chapter_title is not None
+        ):
+            self.logger.info(
+                "Capitolo iniziale specificato (%s): stato precedente ignorato",
+                config.start_chapter,
+            )
+            loaded_state = LessonState()
+            loaded_state.save(config.state_file)
+        self.state = loaded_state
 
     async def run(self) -> None:
         self.logger.info("==== Avvio autoplay ====")
