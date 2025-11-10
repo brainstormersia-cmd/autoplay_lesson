@@ -26,7 +26,13 @@ PERCENTAGE_SELECTOR = (
 )
 PROGRESS_COMPLETE_SELECTOR = ":scope .bg-platform-green[style*='width: 100%'], :scope .bg-platform-primary[style*='width: 100%']"
 CHAPTER_CONTAINER_SELECTOR = "div.bg-white.text-base.border.font-sans.font-semibold"
-CHAPTER_HEADER_SELECTOR = ":scope div.cursor-pointer, :scope div.flex.items-center.font-medium, :scope button"
+CHAPTER_HEADER_SELECTOR = (
+    "div.bg-white.text-base.border div.cursor-pointer, "
+    "div.bg-white.text-base.border svg + div, "
+    "div.bg-white.text-base.border:has(svg), "
+    "div.bg-white.text-base.border div[role='button'], "
+    "div.flex.items-center.font-medium:has(svg)"
+)
 VIDEO_BLOCK_HEADER_TEXT = "Riproduzione del video non consentita"
 VIDEO_BLOCK_HEADER_SELECTOR = "h3.text-2xl.font-medium.mt-4.whitespace-pre-line"
 VIDEO_BLOCK_CONFIRM_SELECTOR = "button.bg-platform-primary.text-white"
@@ -279,9 +285,21 @@ async def collect_chapter_bounds(page: Page, logger, config: RuntimeConfig) -> l
             )
         )
 
-    for current, nxt in zip(results, results[1:]):
-        current.y_max = nxt.y_min if not math.isnan(nxt.y_min) else float("inf")
-
+    for idx, current in enumerate(results):
+        if idx < len(results) - 1:
+            nxt = results[idx + 1]
+            next_min = nxt.y_min
+            if math.isnan(next_min):
+                current.y_max = float("inf")
+            else:
+                current.y_max = next_min - 15
+        else:
+            current.y_max = float("inf")
+        if not math.isnan(current.y_min):
+            if math.isnan(current.y_max):
+                current.y_max = float("inf")
+            if current.y_max - current.y_min < 200:
+                current.y_max = current.y_min + 400
     return results
 
 
@@ -749,6 +767,29 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                 continue
             logger.info("Apri capitolo %s", chapter_label)
             click_desc = f"capitolo {bounds.number or bounds.index}"
+            try:
+                await bounds.click_target.evaluate(
+                    "el => {\n"
+                    "  if (!el) { return; }\n"
+                    "  el.scrollIntoView({ behavior: 'smooth', block: 'center' });\n"
+                    "  window.scrollBy(0, -120);\n"
+                    "}"
+                )
+                await asyncio.sleep(0.7)
+            except PlaywrightError:
+                if page is not None:
+                    try:
+                        await page.evaluate(
+                            "el => {\n"
+                            "  if (!el) { return; }\n"
+                            "  el.scrollIntoView({ behavior: 'instant', block: 'center' });\n"
+                            "  window.scrollBy(0, -120);\n"
+                            "}",
+                            await bounds.click_target.element_handle(),
+                        )
+                        await asyncio.sleep(0.3)
+                    except PlaywrightError:
+                        pass
             if not await click_with_retry(
                 bounds.click_target,
                 config,
@@ -756,12 +797,56 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
                 description=click_desc,
                 page=page,
             ):
-                logger.error("Impossibile aprire capitolo %s", chapter_label)
-                continue
+                fallback_title = bounds.title.split("-", 1)[-1].strip() or bounds.title.strip()
+                if fallback_title and page is not None:
+                    logger.info(
+                        "Fallback click capitolo %s usando testo '%s'",
+                        chapter_label,
+                        fallback_title,
+                    )
+                    text_locator = page.locator(
+                        f"text=/{re.escape(fallback_title)}/i"
+                    ).first
+                    if await text_locator.count():
+                        if await click_with_retry(
+                            text_locator,
+                            config,
+                            logger,
+                            description=f"{click_desc} fallback",
+                            page=page,
+                        ):
+                            logger.info(
+                                "Click fallback capitolo %s riuscito",
+                                chapter_label,
+                            )
+                        else:
+                            logger.error(
+                                "Impossibile aprire capitolo %s anche con fallback testo",
+                                chapter_label,
+                            )
+                            continue
+                    else:
+                        logger.error(
+                            "Fallback testo per capitolo %s non trovato", chapter_label
+                        )
+                        continue
+                else:
+                    logger.error("Impossibile aprire capitolo %s", chapter_label)
+                    continue
             logger.info(
                 "Attesa %ss per render capitolo %s", config.lesson_render_wait, chapter_label
             )
             await asyncio.sleep(config.lesson_render_wait)
+            try:
+                await bounds.container.evaluate("el => el && el.offsetHeight")
+                new_bbox = await bounds.container.bounding_box()
+            except PlaywrightError:
+                new_bbox = None
+            if new_bbox:
+                bounds.y_min = new_bbox.get("y", bounds.y_min)
+                height = new_bbox.get("height")
+                if height is not None:
+                    bounds.y_max = bounds.y_min + height + 300
             await _prime_chapter_content(page, bounds, logger)
 
             attempts: dict[str, int] = {}
