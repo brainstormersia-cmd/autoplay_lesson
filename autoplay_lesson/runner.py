@@ -7,6 +7,7 @@ from typing import Optional
 from playwright.async_api import (
     BrowserContext,
     Error as PlaywrightError,
+    Locator,
     Page,
     TimeoutError as PlaywrightTimeoutError,
 )
@@ -53,19 +54,75 @@ async def run_from_cli(config: RuntimeConfig) -> None:
     await runner.run()
 
 
+PASSWORD_SELECTORS: tuple[str, ...] = ("#password", "input[type='password']")
+USERNAME_SELECTORS: tuple[str, ...] = ("#username", "input[name*='user']", "input[id*='user']")
+SUBMIT_SELECTORS: tuple[str, ...] = (
+    "button:has-text(\"Accedi\")",
+    "button[type='submit']",
+    "button:has-text('Login')",
+)
+
+
+async def _find_login_form(page: Page) -> tuple[Locator | None, Locator | None, Locator | None]:
+    """Return locators for username, password and submit button if a login form is present."""
+
+    frames = [page.main_frame, *[frame for frame in page.frames if frame != page.main_frame]]
+    for frame in frames:
+        for password_selector in PASSWORD_SELECTORS:
+            try:
+                password_field = frame.locator(password_selector)
+                if not await password_field.count():
+                    continue
+            except PlaywrightError:
+                continue
+
+            username_field: Locator | None = None
+            for username_selector in USERNAME_SELECTORS:
+                try:
+                    candidate = frame.locator(username_selector)
+                except PlaywrightError:
+                    continue
+                try:
+                    if await candidate.count():
+                        username_field = candidate
+                        break
+                except PlaywrightError:
+                    continue
+
+            submit_button: Locator | None = None
+            for button_selector in SUBMIT_SELECTORS:
+                try:
+                    candidate = frame.locator(button_selector)
+                except PlaywrightError:
+                    continue
+                try:
+                    if await candidate.count():
+                        submit_button = candidate
+                        break
+                except PlaywrightError:
+                    continue
+
+            return username_field, password_field, submit_button
+
+    return None, None, None
+
+
 async def ensure_logged_in(page: Page, config: RuntimeConfig, logger) -> None:
     """Ensure the user is authenticated before proceeding."""
 
-    try:
-        password_field = page.locator("#password")
-        login_container = page.locator(".flex.flex-col.h-screen.bg-white")
-        password_present = await password_field.count() > 0
-        container_present = await login_container.count() > 0
-    except PlaywrightError:
-        logger.debug("Impossibile determinare lo stato di login attuale")
-        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + config.page_timeout
+    username_field: Locator | None = None
+    password_field: Locator | None = None
+    submit_button: Locator | None = None
 
-    if not password_present and not container_present:
+    while loop.time() < deadline:
+        username_field, password_field, submit_button = await _find_login_form(page)
+        if password_field is not None:
+            break
+        await page.wait_for_timeout(500)
+
+    if password_field is None:
         logger.debug("Sessione già autenticata, nessun login necessario")
         return
 
@@ -75,34 +132,33 @@ async def ensure_logged_in(page: Page, config: RuntimeConfig, logger) -> None:
 
     logger.info("Pagina di login rilevata, avvio autenticazione automatica per %s", config.username)
 
-    try:
-        username_field = page.locator("#username")
-        if await username_field.count():
+    if username_field is not None:
+        try:
             await username_field.first.fill(config.username)
-        else:
-            logger.warning("Campo username non trovato nella pagina di login")
-    except PlaywrightError:
-        logger.warning("Impossibile compilare il campo username")
+        except PlaywrightError:
+            logger.warning("Impossibile compilare il campo username")
+    else:
+        logger.warning("Campo username non trovato nella pagina di login")
 
     try:
-        if await password_field.count():
-            await password_field.first.fill(config.password)
-        else:
-            logger.warning("Campo password non trovato nella pagina di login")
-            return
+        await password_field.first.fill(config.password)
     except PlaywrightError:
         logger.warning("Impossibile compilare il campo password")
         return
 
-    try:
-        login_button = page.locator('button:has-text("Accedi")')
-        if await login_button.count():
-            await login_button.first.click(timeout=int(config.click_timeout * 1000))
-        else:
-            logger.warning("Bottone di accesso non trovato")
-    except PlaywrightError as exc:
-        logger.warning("Errore durante il click sul bottone di accesso: %s", exc)
-        return
+    if submit_button is not None:
+        try:
+            await submit_button.first.click(timeout=int(config.click_timeout * 1000))
+        except PlaywrightError as exc:
+            logger.warning("Errore durante il click sul bottone di accesso: %s", exc)
+            return
+    else:
+        logger.warning("Bottone di accesso non trovato, invio con Enter")
+        try:
+            await password_field.first.press("Enter")
+        except PlaywrightError:
+            logger.warning("Impossibile inviare il form di login")
+            return
 
     await page.wait_for_timeout(int(config.login_wait * 1000))
 
@@ -112,7 +168,11 @@ async def ensure_logged_in(page: Page, config: RuntimeConfig, logger) -> None:
         logger.debug("Timeout durante l'attesa del caricamento post login")
 
     try:
-        await page.goto(config.url, wait_until="domcontentloaded", timeout=int(config.navigation_timeout * 1000))
+        await page.goto(
+            config.url,
+            wait_until="domcontentloaded",
+            timeout=int(config.navigation_timeout * 1000),
+        )
     except PlaywrightError as exc:
         logger.warning("Impossibile ricaricare la pagina principale dopo il login: %s", exc)
         return
