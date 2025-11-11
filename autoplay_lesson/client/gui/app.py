@@ -14,12 +14,13 @@ from autoplay_lesson.client.gui.components.header import Header
 from autoplay_lesson.client.gui.components.help_panel import HelpPanel
 from autoplay_lesson.client.gui.components.sidebar import Sidebar
 from autoplay_lesson.client.gui.components.status_panel import StatusPanel
+from autoplay_lesson.client.version import VERSION as APP_VERSION
 
 
 class DarkPegasoApp(ctk.CTk):
     """Main window orchestrating the different sections."""
 
-    VERSION = "1.0.0"
+    VERSION = APP_VERSION
 
     def __init__(self) -> None:
         super().__init__()

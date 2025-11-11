@@ -6,6 +6,7 @@ import datetime as _dt
 
 import customtkinter as ctk
 
+from autoplay_lesson.client.assets import get_logo_image
 from autoplay_lesson.client.gui import styles
 
 
@@ -19,15 +20,30 @@ class Header(ctk.CTkFrame):
             fg_color=styles.palette.background_primary,
         )
         self.grid_propagate(False)
-        self.columnconfigure(0, weight=1)
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=1)
+        self.columnconfigure(2, weight=0)
+
+        logo_image = get_logo_image((44, 44))
+        self._logo_photo = ctk.CTkImage(
+            light_image=logo_image,
+            dark_image=logo_image,
+            size=(44, 44),
+        )
+        self._logo = ctk.CTkLabel(
+            self,
+            image=self._logo_photo,
+            text="",
+        )
+        self._logo.grid(row=0, column=0, padx=(24, 12), pady=8, sticky="w")
 
         self._title = ctk.CTkLabel(
             self,
-            text="🌟 DarkPegaso",
+            text="DarkPegaso",
             font=styles.typography.title,
             text_color=styles.palette.text_primary,
         )
-        self._title.grid(row=0, column=0, sticky="w", padx=24)
+        self._title.grid(row=0, column=1, sticky="w")
 
         self._version = ctk.CTkLabel(
             self,
@@ -35,7 +51,7 @@ class Header(ctk.CTkFrame):
             font=styles.typography.primary,
             text_color=styles.palette.text_secondary,
         )
-        self._version.grid(row=0, column=1, sticky="e", padx=24)
+        self._version.grid(row=0, column=2, sticky="e", padx=24)
 
     def set_status_text(self, message: str) -> None:
         """Update the header's subtitle with a timestamped message."""

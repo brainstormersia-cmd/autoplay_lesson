@@ -63,6 +63,12 @@ Tutte le impostazioni salvate vengono ricaricate automaticamente all'avvio succe
 
 Per chiudere rapidamente l'applicazione puoi premere **Esc** o selezionare "Esci" dalla sidebar.
 
+### Logo personalizzato
+
+- Inserisci il file PNG del logo in `autoplay_lesson/autoplay_lesson/client/assets/darkpegaso_logo.png` (consigliato 256×256px con sfondo trasparente).
+- In alternativa imposta la variabile d'ambiente `DARKPEGASO_LOGO` con il percorso di un'immagine esterna.
+- Se non viene trovato alcun file, l'app genera automaticamente un logo placeholder in stile neon.
+
 ## Creare l'eseguibile Windows (.exe)
 
 Per distribuire il client come applicazione Windows autonoma puoi utilizzare **PyInstaller**:
@@ -76,19 +82,39 @@ Per distribuire il client come applicazione Windows autonoma puoi utilizzare **P
    pip install -r requirements.txt pyinstaller
    ```
 
-2. Genera l'eseguibile:
+2. Inserisci (o verifica) il logo PNG in `autoplay_lesson/autoplay_lesson/client/assets/darkpegaso_logo.png`.
+
+3. Genera l'eseguibile includendo gli asset della GUI:
 
    ```bash
    pyinstaller \
      --name DarkPegaso \
      --windowed \
      --onefile \
+     --add-data "autoplay_lesson/autoplay_lesson/client/assets;autoplay_lesson/client/assets" \
      autoplay_lesson\\autoplay_lesson\\client\\main.py
    ```
 
    > Se vuoi un'icona personalizzata convertila in formato `.ico` (es. con Inkscape o ImageMagick) e aggiungi l'opzione `--icon percorso\\logo.ico`.
 
-3. Il file `dist/DarkPegaso.exe` è pronto per essere distribuito. Mantieni accanto eventuali file di configurazione (`config.json`) se vuoi fornire preset precompilati.
+4. Il file `dist/DarkPegaso.exe` è pronto per essere distribuito. Mantieni accanto eventuali file di configurazione (`config.json`) se vuoi fornire preset precompilati.
+
+### Preparare una cartella distribuibile
+
+Per consegnare il programma a collaboratori o clienti puoi creare una cartella preconfigurata con logo, template di configurazione e guida rapida:
+
+```bash
+python tools/prepare_distribution.py
+```
+
+Il comando produce `release/DarkPegaso_1_0_0/` con i seguenti contenuti:
+
+- `DarkPegaso.exe`: l'eseguibile PyInstaller copiato da `dist/`.
+- `assets/darkpegaso_logo.png`: logo PNG (o placeholder generato automaticamente se non presente).
+- `config.json.example`: esempio di configurazione pronta da rinominare.
+- `README.txt`: istruzioni rapide per chi riceve la cartella.
+
+Puoi comprimere la cartella risultante in `.zip` e distribuirla direttamente.
 
 Per ripetere la build da zero elimina le cartelle `build/`, `dist/` e il file `.spec` generato da PyInstaller.
 
