@@ -5,7 +5,7 @@ import asyncio
 import math
 import random
 from dataclasses import dataclass
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict, Optional, Set, TYPE_CHECKING
 
 from playwright.async_api import Error as PlaywrightError, Locator, Page
 
@@ -16,6 +16,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 QUIZ_CONTAINER_SELECTOR = "div.mt-8.px-4"
+COLLAPSIBLE_HEADER_SELECTOR = "div.flex.align-middle.leading-none.px-4"
 OPTION_SELECTOR = ":scope .px-3"
 SELECTED_CLASS = "bg-platform-active-color"
 WRONG_CLASS = "!bg-platform-red/10"
@@ -36,7 +37,7 @@ class QuizSolver:
     """Implements the retry logic required to complete a quiz."""
 
     MAX_ATTEMPTS = 50
-    CORRECT_THRESHOLD = 0.8
+    CORRECT_THRESHOLD: Optional[float] = None
 
     def __init__(
         self,
@@ -54,6 +55,7 @@ class QuizSolver:
         self.watchdog = watchdog
         self.correct_answers: Dict[int, int] = {}
         self.wrong_answers: Dict[int, set[int]] = {}
+        self._touched_sections: Set[int] = set()
 
     async def solve(self) -> QuizOutcome:
         """Attempt to solve the quiz, returning the final outcome."""
@@ -76,7 +78,9 @@ class QuizSolver:
         if total_questions == 0:
             return QuizOutcome(0, 0, 0, False)
 
-        required_correct = max(1, math.ceil(total_questions * self.CORRECT_THRESHOLD))
+        required_correct: Optional[int] = None
+        if self.CORRECT_THRESHOLD:
+            required_correct = max(1, math.ceil(total_questions * self.CORRECT_THRESHOLD))
         attempt = 0
         last_correct = 0
 
@@ -98,9 +102,11 @@ class QuizSolver:
                 continue
 
             try:
-                await asyncio.sleep(self._adjusted_delay(1.5))
+                await self._human_pause(1.2)
             except asyncio.CancelledError:  # pragma: no cover - cooperative cancellation
                 break
+
+            await self._wait_for_feedback(total_questions)
 
             correct_count = await self._collect_results(total_questions)
             last_correct = correct_count
@@ -108,9 +114,21 @@ class QuizSolver:
                 "Quiz: risposte corrette %s/%s (soglia %s)",
                 correct_count,
                 total_questions,
-                required_correct,
+                required_correct if required_correct is not None else "disattivata",
             )
-            if correct_count >= required_correct:
+            all_correct = correct_count == total_questions and total_questions > 0
+            threshold_reached = (
+                required_correct is not None and correct_count >= required_correct
+            )
+            if threshold_reached or all_correct:
+                return QuizOutcome(attempt, correct_count, total_questions, True)
+
+            if required_correct is None:
+                self.logger.info(
+                    "Quiz: completato con punteggio %s/%s, soglia minima disattivata",
+                    correct_count,
+                    total_questions,
+                )
                 return QuizOutcome(attempt, correct_count, total_questions, True)
 
             try:
@@ -137,7 +155,52 @@ class QuizSolver:
                 await asyncio.sleep(self._adjusted_delay(2.0))
         except PlaywrightError as exc:
             self.logger.debug("Quiz: impossibile cliccare 'Esegui': %s", exc)
-        await self.page.wait_for_selector(QUIZ_CONTAINER_SELECTOR, timeout=8000)
+        await self._expand_collapsible_sections()
+        try:
+            await self.page.wait_for_selector(QUIZ_CONTAINER_SELECTOR, timeout=8000)
+        except PlaywrightError:
+            await self._expand_collapsible_sections(force=True)
+            await self.page.wait_for_selector(QUIZ_CONTAINER_SELECTOR, timeout=5000)
+
+    async def _expand_collapsible_sections(self, *, force: bool = False) -> None:
+        if self.stop_event.is_set():
+            return
+        headers = self.page.locator(COLLAPSIBLE_HEADER_SELECTOR)
+        try:
+            count = await headers.count()
+        except PlaywrightError:
+            return
+        if count == 0:
+            return
+        for index in range(count):
+            if not force and index in self._touched_sections:
+                continue
+            if await self.page.locator(QUIZ_CONTAINER_SELECTOR).count():
+                return
+            header = headers.nth(index)
+            clickable = header
+            try:
+                button_candidate = header.locator("button, [role='button']")
+                if await button_candidate.count():
+                    clickable = button_candidate.first
+            except PlaywrightError:
+                pass
+            clicked = await self._safe_click(clickable, f"apertura sezione quiz {index + 1}")
+            if not clicked:
+                try:
+                    toggle = header.locator("svg").first
+                    if await toggle.count():
+                        clicked = await self._safe_click(
+                            toggle, f"espansione icona quiz {index + 1}"
+                        )
+                except PlaywrightError:
+                    clicked = False
+            if clicked and not force:
+                self._touched_sections.add(index)
+            if clicked:
+                await self._human_pause(0.45)
+        if force:
+            await self.page.wait_for_timeout(200)
 
     async def _answer_questions(self, total_questions: int) -> None:
         for index in range(total_questions):
@@ -154,6 +217,7 @@ class QuizSolver:
             await self._human_pause(0.35)
 
         await self._ensure_all_answered(total_questions)
+        await self._human_review(total_questions)
 
     async def _ensure_all_answered(self, total_questions: int) -> None:
         questions = self.page.locator(QUIZ_CONTAINER_SELECTOR)
@@ -185,10 +249,12 @@ class QuizSolver:
             return
         if option_index >= count:
             return
-        try:
-            await options.nth(option_index).click()
-        except PlaywrightError as exc:
-            self.logger.debug("Quiz: errore nel ripristino risposta %s: %s", option_index, exc)
+        target = options.nth(option_index)
+        if not await self._safe_click(target, f"ripristino risposta {option_index}"):
+            self.logger.debug(
+                "Quiz: errore nel ripristino risposta %s: nessuna interazione riuscita",
+                option_index,
+            )
 
     async def _select_random_option(self, question: Locator, question_index: int) -> None:
         options = question.locator(OPTION_SELECTOR)
@@ -205,20 +271,31 @@ class QuizSolver:
         if not candidates:
             self.logger.warning("Quiz: nessuna opzione disponibile per domanda %s", question_index + 1)
             return
-        selected_index = random.choice(candidates)
-        try:
-            await options.nth(selected_index).click()
-        except PlaywrightError as exc:
-            self.logger.debug("Quiz: click opzione fallito (%s): %s", selected_index, exc)
-        else:
-            self.logger.debug("Quiz: selezionata opzione %s per domanda %s", selected_index, question_index + 1)
+        random.shuffle(candidates)
+        for selected_index in candidates:
+            if await self._safe_click(
+                options.nth(selected_index),
+                f"opzione {selected_index} domanda {question_index + 1}",
+            ):
+                await self._human_pause(0.2)
+                self.logger.debug(
+                    "Quiz: selezionata opzione %s per domanda %s",
+                    selected_index,
+                    question_index + 1,
+                )
+                return
+        self.logger.warning(
+            "Quiz: impossibile selezionare una risposta per domanda %s",
+            question_index + 1,
+        )
 
     async def _submit_answers(self) -> bool:
         button = self.page.locator(SUBMIT_SELECTOR)
         try:
             if await button.count():
-                await button.first.click()
-                return True
+                if await self._safe_click(button.first, "invio risposte"):
+                    await self._human_pause(0.25)
+                    return True
         except PlaywrightError as exc:
             self.logger.debug("Quiz: click 'Invia' fallito: %s", exc)
         return False
@@ -252,8 +329,9 @@ class QuizSolver:
         button = self.page.locator(RETRY_SELECTOR)
         try:
             if await button.count():
-                await button.first.click()
-                return True
+                if await self._safe_click(button.first, "ripeti quiz"):
+                    await self._human_pause(0.45)
+                    return True
         except PlaywrightError as exc:
             self.logger.debug("Quiz: click 'Ripeti' fallito: %s", exc)
         return False
@@ -280,6 +358,99 @@ class QuizSolver:
                 await asyncio.sleep(self._adjusted_delay(0.6))
         except PlaywrightError:
             return
+
+    async def _human_review(self, total_questions: int) -> None:
+        if total_questions == 0 or random.random() > 0.55:
+            return
+        question_index = random.randrange(total_questions)
+        question = self.page.locator(QUIZ_CONTAINER_SELECTOR).nth(question_index)
+        options = question.locator(OPTION_SELECTOR)
+        try:
+            option_count = await options.count()
+        except PlaywrightError:
+            return
+        if option_count == 0:
+            return
+        target_index = random.randrange(option_count)
+        try:
+            await options.nth(target_index).hover()
+            await self._human_pause(0.2)
+        except PlaywrightError:
+            return
+        else:
+            self.logger.debug(
+                "Quiz: ricontrollata domanda %s prima dell'invio",
+                question_index + 1,
+            )
+
+    async def _wait_for_feedback(self, total_questions: int) -> None:
+        feedback_detected = False
+        for attempt in range(6):
+            if self.stop_event.is_set():
+                return
+            try:
+                if await self.page.locator(RETRY_SELECTOR).count():
+                    feedback_detected = True
+                    break
+            except PlaywrightError:
+                pass
+            if await self._has_feedback_marks(total_questions):
+                feedback_detected = True
+                break
+            await self._human_pause(0.4)
+        if not feedback_detected:
+            self.logger.debug("Quiz: feedback non rilevato esplicitamente dopo l'invio")
+
+    async def _has_feedback_marks(self, total_questions: int) -> bool:
+        questions = self.page.locator(QUIZ_CONTAINER_SELECTOR)
+        try:
+            count = await questions.count()
+        except PlaywrightError:
+            return False
+        count = min(count, total_questions)
+        for index in range(count):
+            options = questions.nth(index).locator(OPTION_SELECTOR)
+            try:
+                option_count = await options.count()
+            except PlaywrightError:
+                continue
+            for opt_index in range(option_count):
+                try:
+                    classes = await options.nth(opt_index).get_attribute("class")
+                except PlaywrightError:
+                    continue
+                tokens = set((classes or "").split())
+                if WRONG_CLASS in tokens:
+                    return True
+        return False
+
+    async def _safe_click(self, target: Locator, description: str) -> bool:
+        for attempt in range(3):
+            try:
+                await target.scroll_into_view_if_needed(timeout=2000)
+            except PlaywrightError:
+                pass
+            try:
+                await target.click(timeout=2000, force=False)
+            except PlaywrightError as exc:
+                self.logger.debug(
+                    "Quiz: click fallito (%s) al tentativo %s: %s",
+                    description,
+                    attempt + 1,
+                    exc,
+                )
+                await self._human_pause(0.25)
+                continue
+            else:
+                if attempt:
+                    self.logger.debug(
+                        "Quiz: click riuscito (%s) dopo %s tentativi",
+                        description,
+                        attempt + 1,
+                    )
+                return True
+        self.logger.warning("Quiz: nessun click riuscito per %s", description)
+        return False
 
     async def _human_pause(self, base: float) -> None:
         try:
