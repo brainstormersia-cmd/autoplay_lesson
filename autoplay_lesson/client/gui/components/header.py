@@ -1,4 +1,4 @@
-"""Header component for the DarkPegaso shell."""
+"""Header bar with branding and status highlights."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class Header(ctk.CTkFrame):
     def __init__(self, master: ctk.CTkBaseClass, *, version: str) -> None:
         super().__init__(
             master,
-            height=60,
+            height=72,
             fg_color=styles.palette.header_background,
             border_width=0,
         )
@@ -25,18 +25,28 @@ class Header(ctk.CTkFrame):
         self.columnconfigure(1, weight=1)
         self.columnconfigure(2, weight=0)
 
-        logo_image = get_logo_image((44, 44))
+        logo_image = get_logo_image((52, 52))
         self._logo_photo = ctk.CTkImage(
             light_image=logo_image,
             dark_image=logo_image,
-            size=(44, 44),
+            size=(52, 52),
         )
-        self._logo = ctk.CTkLabel(
+
+        self._logo_glow = ctk.CTkFrame(
             self,
+            fg_color=styles.palette.logo_glow,
+            corner_radius=28,
+        )
+        self._logo_glow.grid(row=0, column=0, padx=(28, 16), pady=10, sticky="w")
+        self._logo_glow.grid_propagate(False)
+        self._logo_glow.configure(width=64, height=64)
+
+        self._logo = ctk.CTkLabel(
+            self._logo_glow,
             image=self._logo_photo,
             text="",
         )
-        self._logo.grid(row=0, column=0, padx=(24, 12), pady=8, sticky="w")
+        self._logo.pack(expand=True)
 
         title_frame = ctk.CTkFrame(
             self,
@@ -48,14 +58,14 @@ class Header(ctk.CTkFrame):
         self._title = ctk.CTkLabel(
             title_frame,
             text="DarkPegaso",
-            font=styles.typography.title,
+            font=styles.typography.hero,
             text_color=styles.palette.text_primary,
         )
         self._title.grid(row=0, column=0, sticky="w")
 
         subtitle = ctk.CTkLabel(
             title_frame,
-            text="Control Center",
+            text="Live Automation HUD",
             font=styles.typography.primary,
             text_color=styles.palette.text_secondary,
         )
@@ -67,7 +77,7 @@ class Header(ctk.CTkFrame):
             font=styles.typography.primary,
             text_color=styles.palette.text_secondary,
         )
-        self._version.grid(row=0, column=2, sticky="e", padx=24)
+        self._version.grid(row=0, column=2, sticky="e", padx=28)
 
         self._accent = ctk.CTkFrame(
             self,
@@ -79,5 +89,8 @@ class Header(ctk.CTkFrame):
     def set_status_text(self, message: str) -> None:
         """Update the header's subtitle with a timestamped message."""
 
-        timestamp = _dt.datetime.now().strftime("%H:%M")
+        timestamp = _dt.datetime.now().strftime("%H:%M:%S")
         self._version.configure(text=f"{message} · {timestamp}")
+
+
+__all__ = ["Header"]
