@@ -28,31 +28,51 @@ class DarkPegasoApp(ctk.CTk):
         self.geometry("1280x780")
         self.minsize(1180, 680)
         ctk.set_appearance_mode("dark")
+        self.configure(fg_color=styles.palette.background_primary)
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
 
+        background = styles.build_background_image((1600, 1000))
+        self._background_image = ctk.CTkImage(light_image=background, dark_image=background, size=(1600, 1000))
+        self._background_label = ctk.CTkLabel(self, text="", image=self._background_image)
+        self._background_label.place(relx=0.5, rely=0.5, anchor="center")
+        self._parallax_after: str | None = None
+        self._parallax_strength = 0.014
+        self.bind("<Motion>", self._handle_parallax)
+
         self._header = Header(self, version=self.VERSION)
         self._header.grid(row=0, column=0, sticky="ew")
 
-        self._content = ctk.CTkScrollableFrame(
+        self._content = ctk.CTkFrame(
             self,
-            fg_color=styles.palette.background_primary,
-            corner_radius=0,
+            fg_color=styles.palette.background_layer,
+            corner_radius=32,
+            border_width=1,
+            border_color=styles.palette.soft_outline,
         )
-        self._content.grid(row=1, column=0, sticky="nsew")
-        self._content.grid_columnconfigure(0, weight=1)
-        self._content.grid_columnconfigure(1, weight=1)
+        self._content.grid(row=1, column=0, sticky="nsew", padx=32, pady=(14, 24))
+        self._content.grid_columnconfigure((0, 1), weight=1, uniform="columns")
         self._content.grid_rowconfigure(0, weight=1)
 
-        self._dashboard = Dashboard(self._content)
-        self._dashboard.grid(row=0, column=0, sticky="nsew", padx=(28, 16), pady=24)
+        self._left_column = ctk.CTkFrame(self._content, fg_color="transparent")
+        self._left_column.grid(row=0, column=0, sticky="nsew", padx=(24, 12), pady=24)
+        self._left_column.grid_columnconfigure(0, weight=1)
+        self._left_column.grid_rowconfigure(0, weight=1)
 
-        self._config = ConfigPanel(self._content)
-        self._config.grid(row=0, column=1, sticky="nsew", padx=(16, 28), pady=24)
+        self._right_column = ctk.CTkFrame(self._content, fg_color="transparent")
+        self._right_column.grid(row=0, column=1, sticky="nsew", padx=(12, 24), pady=24)
+        self._right_column.grid_columnconfigure(0, weight=1)
+
+        self._dashboard = Dashboard(self._left_column)
+        self._dashboard.grid(row=0, column=0, sticky="nsew")
+
+        self._config = ConfigPanel(self._right_column)
+        self._config.grid(row=0, column=0, sticky="nsew")
 
         self._footer = Footer(self)
         self._footer.grid(row=2, column=0, sticky="ew")
+        self._background_label.lower()
 
         self._config.set_save_command(self._save_config)
         self._dashboard.control_card.configure_command(self._toggle_bot)
@@ -66,11 +86,35 @@ class DarkPegasoApp(ctk.CTk):
         self._load_config()
         self._switch_idle_state()
 
+    def _handle_parallax(self, event) -> None:
+        """Offset the neon background slightly following the cursor."""
+
+        if not self.winfo_width() or not self.winfo_height():
+            return
+        rel_x = event.x / max(1, self.winfo_width()) - 0.5
+        rel_y = event.y / max(1, self.winfo_height()) - 0.5
+        offset_x = rel_x * self._parallax_strength
+        offset_y = rel_y * self._parallax_strength
+        self._background_label.place(relx=0.5 - offset_x, rely=0.5 - offset_y, anchor="center")
+        if self._parallax_after is not None:
+            self.after_cancel(self._parallax_after)
+        self._parallax_after = self.after(1600, self._reset_parallax)
+
+    def _reset_parallax(self) -> None:
+        """Restore the background to its default centered position."""
+
+        self._parallax_after = None
+        self._background_label.place(relx=0.5, rely=0.5, anchor="center")
+
     def _switch_idle_state(self) -> None:
         self._dashboard.status_card.update_status("● Pronto", styles.palette.success)
         self._dashboard.status_card.update_counts(lessons=self._lessons_completed, quizzes=self._quizzes_completed)
         self._dashboard.status_card.update_duration("00:00")
         self._dashboard.status_card.update_last_run("Ultimo evento: --")
+        self._dashboard.update_metrics(lessons=self._lessons_completed, quizzes=self._quizzes_completed, total_seconds=0.0)
+        self._header.update_session_time("00:00")
+        self._header.set_live_state(False)
+        self._dashboard.progress_bar.set_active(False)
 
     def _save_config(self) -> None:
         url_value = self._config.url_var.get().strip()
@@ -115,6 +159,8 @@ class DarkPegasoApp(ctk.CTk):
             self._dashboard.log_console.append("⏹️ Bot fermato", category="warning")
             self._dashboard.notifications.push("Bot fermato", "Automazione interrotta manualmente", level="warning")
             self._header.set_status_text("Automazione in pausa")
+            self._header.set_live_state(False)
+            self._dashboard.progress_bar.set_active(False)
             return
 
         current_values = {
@@ -167,6 +213,8 @@ class DarkPegasoApp(ctk.CTk):
         self._dashboard.log_console.append("🚀 Bot avviato", category="action")
         self._dashboard.notifications.push("Bot in esecuzione", "DarkPegaso ha iniziato l'automazione", level="info")
         self._header.set_status_text("Automazione in corso")
+        self._header.set_live_state(True)
+        self._dashboard.progress_bar.set_active(True)
 
     def _reset_session_metrics(self) -> None:
         self._session_start = time.monotonic()
@@ -174,16 +222,21 @@ class DarkPegasoApp(ctk.CTk):
         self._quizzes_completed = 0
         self._dashboard.status_card.update_counts(lessons=0, quizzes=0)
         self._dashboard.status_card.update_duration("00:00")
+        self._dashboard.update_metrics(lessons=0, quizzes=0, total_seconds=0.0)
+        self._header.update_session_time("00:00")
 
     def _handle_bot_log(self, message: str, level: str = "default") -> None:
         category = self._extract_category(message)
         self._dashboard.log_console.append(message, category=category)
-        self._dashboard.status_card.update_last_run(self._trim_message(message))
+        trimmed = self._trim_message(message)
+        self._dashboard.status_card.update_last_run(trimmed)
+        duration_seconds = 0.0
         if self._session_start is not None:
-            duration = self._format_duration(time.monotonic() - self._session_start)
+            duration_seconds = time.monotonic() - self._session_start
+            duration = self._format_duration(duration_seconds)
             self._dashboard.status_card.update_duration(duration)
-        self._header.set_status_text(self._trim_message(message))
-
+            self._header.update_session_time(duration)
+        self._header.set_status_text(trimmed)
         lowered = message.lower()
         if "lezione completata" in lowered:
             self._lessons_completed += 1
@@ -217,6 +270,12 @@ class DarkPegasoApp(ctk.CTk):
                 self._trim_message(message),
                 level="error",
             )
+
+        self._dashboard.update_metrics(
+            lessons=self._lessons_completed,
+            quizzes=self._quizzes_completed,
+            total_seconds=duration_seconds,
+        )
 
         if "==== avvio autoplay" in lowered:
             self._reset_session_metrics()

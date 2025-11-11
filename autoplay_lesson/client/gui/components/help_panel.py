@@ -36,8 +36,10 @@ class HelpPanel(ctk.CTkFrame):
 
         card = ctk.CTkFrame(
             self,
-            fg_color=styles.palette.background_secondary,
-            corner_radius=12,
+            fg_color=styles.palette.background_glass,
+            corner_radius=20,
+            border_width=1,
+            border_color=styles.palette.soft_outline,
         )
         card.grid(row=0, column=0, sticky="nsew")
         card.columnconfigure(0, weight=1)
@@ -55,10 +57,12 @@ class HelpPanel(ctk.CTkFrame):
 
         textbox = ctk.CTkTextbox(
             card,
-            fg_color=styles.palette.background_primary,
+            fg_color=styles.palette.background_glass_alt,
             text_color=styles.palette.text_secondary,
             font=styles.typography.primary,
             wrap="word",
+            corner_radius=14,
+            border_width=0,
         )
         textbox.insert("1.0", HELP_TEXT)
         textbox.configure(state="disabled")
@@ -72,6 +76,7 @@ class HelpPanel(ctk.CTkFrame):
             button_frame,
             text="📹 Video Tutorial",
             fg_color=styles.palette.accent_primary,
+            hover_color=styles.blend(styles.palette.accent_primary, styles.palette.accent_secondary, 0.3),
         )
         tutorial.grid(row=0, column=0, sticky="ew", padx=(0, 8))
 
@@ -79,5 +84,6 @@ class HelpPanel(ctk.CTkFrame):
             button_frame,
             text="❓ FAQ",
             fg_color=styles.palette.accent_secondary,
+            hover_color=styles.blend(styles.palette.accent_secondary, styles.palette.accent_primary, 0.3),
         )
         faq.grid(row=0, column=1, sticky="ew", padx=(8, 0))

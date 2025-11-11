@@ -23,7 +23,13 @@ class StatusPanel(ctk.CTkFrame):
         lesson_card.grid(row=1, column=0, sticky="ew", pady=(0, 16))
         self.lesson_card = lesson_card
 
-        log_card = ctk.CTkFrame(self, fg_color=styles.palette.background_secondary, corner_radius=12)
+        log_card = ctk.CTkFrame(
+            self,
+            fg_color=styles.palette.background_glass,
+            corner_radius=20,
+            border_width=1,
+            border_color=styles.palette.soft_outline,
+        )
         log_card.grid(row=2, column=0, sticky="nsew")
         log_card.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
@@ -46,13 +52,20 @@ class StatusPanel(ctk.CTkFrame):
             log_card,
             text="Esporta",
             fg_color=styles.palette.accent_primary,
+            hover_color=styles.blend(styles.palette.accent_primary, styles.palette.accent_secondary, 0.3),
         )
         self.export_button.place(relx=0.95, rely=0.08, anchor="ne")
 
 
 class _StatsCard(ctk.CTkFrame):
     def __init__(self, master: ctk.CTkBaseClass) -> None:
-        super().__init__(master, fg_color=styles.palette.background_secondary, corner_radius=12)
+        super().__init__(
+            master,
+            fg_color=styles.palette.background_glass,
+            corner_radius=20,
+            border_width=1,
+            border_color=styles.palette.soft_outline,
+        )
         self.columnconfigure(0, weight=1)
 
         title = ctk.CTkLabel(
@@ -113,7 +126,13 @@ class _StatsCard(ctk.CTkFrame):
 
 class _LessonCard(ctk.CTkFrame):
     def __init__(self, master: ctk.CTkBaseClass) -> None:
-        super().__init__(master, fg_color=styles.palette.background_secondary, corner_radius=12)
+        super().__init__(
+            master,
+            fg_color=styles.palette.background_glass,
+            corner_radius=20,
+            border_width=1,
+            border_color=styles.palette.soft_outline,
+        )
         self.columnconfigure(0, weight=1)
 
         title = ctk.CTkLabel(
