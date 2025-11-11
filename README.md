@@ -73,16 +73,18 @@ Tutte le impostazioni salvate vengono ricaricate automaticamente all'avvio succe
 
 Per chiudere rapidamente l'applicazione puoi premere **Esc** o selezionare "Esci" dalla sidebar.
 
-### Esecuzione su server esterno (Render, VPS, ecc.)
+### Esecuzione su server esterno (Render, VPS, Hetzner, ecc.)
 
-Se vuoi eseguire l'automazione su un server headless—ad esempio come **Background Worker** su Render—consulta la guida dedicata in [`docs/DEPLOY_RENDER.md`](docs/DEPLOY_RENDER.md). Troverai:
+Per server headless o VPS ti consigliamo la guida dedicata in [`docs/DEPLOY_RENDER.md`](docs/DEPLOY_RENDER.md). Oltre alla procedura per Render troverai:
 
-- esempio di `config.json` ottimizzato per ambienti remoti,
-- elenco delle variabili d'ambiente consigliate,
-- comandi di build/start pensati per Render (installazione Playwright inclusa),
+- una **checklist di comandi da terminale** copiabili per qualunque VPS Linux (apt, virtualenv, export variabili, avvio headless),
+- una sezione dedicata al **setup di Ubuntu Server 20.04/22.04** con installazione pacchetti, ambiente virtuale e servizio `systemd`,
+- le variabili d'ambiente consigliate per tenere le credenziali fuori dal codice,
+- i comandi di build/start pensati per Render,
+- un setup rapido passo passo per VPS Hetzner/Ubuntu, incluso esempio di servizio `systemd`,
 - suggerimenti per persistere lo stato, schedulare job e monitorare i log.
 
-Le stesse istruzioni sono applicabili anche a VPS o container personali: basta adattare il comando di avvio (`python -m autoplay_lesson ...`) e le variabili d'ambiente al tuo orchestratore.
+Adattando il comando di avvio (`python -m autoplay_lesson ...`) e le variabili d'ambiente alla tua infrastruttura puoi replicare lo stesso flusso su Docker, orchestratori o server personali.
 
 ### Logo personalizzato
 
