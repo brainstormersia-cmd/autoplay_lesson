@@ -73,6 +73,17 @@ Tutte le impostazioni salvate vengono ricaricate automaticamente all'avvio succe
 
 Per chiudere rapidamente l'applicazione puoi premere **Esc** o selezionare "Esci" dalla sidebar.
 
+### Esecuzione su server esterno (Render, VPS, ecc.)
+
+Se vuoi eseguire l'automazione su un server headless—ad esempio come **Background Worker** su Render—consulta la guida dedicata in [`docs/DEPLOY_RENDER.md`](docs/DEPLOY_RENDER.md). Troverai:
+
+- esempio di `config.json` ottimizzato per ambienti remoti,
+- elenco delle variabili d'ambiente consigliate,
+- comandi di build/start pensati per Render (installazione Playwright inclusa),
+- suggerimenti per persistere lo stato, schedulare job e monitorare i log.
+
+Le stesse istruzioni sono applicabili anche a VPS o container personali: basta adattare il comando di avvio (`python -m autoplay_lesson ...`) e le variabili d'ambiente al tuo orchestratore.
+
 ### Logo personalizzato
 
 - Inserisci il file PNG del logo in `autoplay_lesson/autoplay_lesson/client/assets/darkpegaso_logo.png` (consigliato 256×256px con sfondo trasparente).
