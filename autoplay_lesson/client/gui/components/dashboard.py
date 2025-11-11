@@ -540,22 +540,36 @@ class _ControlCard(ctk.CTkFrame):
         )
         self._course_label.grid(row=1, column=0, columnspan=2, sticky="ew", padx=24, pady=(0, 22))
 
+        self._pulse_cycle = (
+            styles.palette.accent_magenta,
+            styles.blend(styles.palette.accent_magenta, styles.palette.accent_secondary, 0.35),
+            styles.blend(styles.palette.accent_magenta, styles.palette.accent_primary, 0.45),
+        )
+        self._pulse_index = 0
+        self._pulse_after: str | None = None
+        self._running = False
+
     def configure_command(self, command) -> None:
         self._button.configure(command=command)
 
     def set_running(self, running: bool) -> None:
+        if running == self._running:
+            return
+        self._running = running
         if running:
             self._button.configure(
                 text="⏹ FERMA BOT",
                 fg_color=styles.palette.error,
                 hover_color=styles.blend(styles.palette.error, styles.palette.warning, 0.3),
             )
+            self._start_pulse()
         else:
             self._button.configure(
                 text="🚀 AVVIA BOT",
                 fg_color=styles.palette.accent_magenta,
                 hover_color=styles.blend(styles.palette.accent_magenta, styles.palette.accent_secondary, 0.3),
             )
+            self._stop_pulse()
 
     def set_course(self, url: str) -> None:
         text = url.strip()
@@ -564,6 +578,30 @@ class _ControlCard(ctk.CTkFrame):
         else:
             display = text if len(text) <= 68 else f"{text[:65]}…"
         self._course_label.configure(text=f"Corso collegato: {display}")
+
+    def _start_pulse(self) -> None:
+        if self._pulse_after is not None:
+            return
+        self._pulse_button()
+
+    def _stop_pulse(self) -> None:
+        if self._pulse_after is not None:
+            self.after_cancel(self._pulse_after)
+            self._pulse_after = None
+        self._button.configure(
+            fg_color=styles.palette.accent_magenta,
+            hover_color=styles.blend(styles.palette.accent_magenta, styles.palette.accent_secondary, 0.3),
+        )
+
+    def _pulse_button(self) -> None:
+        if not self._running:
+            self._pulse_after = None
+            return
+        color = self._pulse_cycle[self._pulse_index % len(self._pulse_cycle)]
+        self._pulse_index += 1
+        hover = styles.blend(color, styles.palette.accent_secondary, 0.35)
+        self._button.configure(fg_color=color, hover_color=hover)
+        self._pulse_after = self.after(420, self._pulse_button)
 
 
 __all__ = ["Dashboard"]

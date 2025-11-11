@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import customtkinter as ctk
 
 from autoplay_lesson.client.gui import styles
@@ -208,6 +210,15 @@ class ConfigPanel(ctk.CTkFrame):
         self._save_cycle_index = 0
         self._animate_save_button()
 
+        self._save_hover = False
+        self._save_hover_phase = 0
+        self._save_hover_after: str | None = None
+        self._save_flash_active = False
+        self._save_flash_phase = 0
+        self._save_button.bind("<Enter>", self._on_save_enter)
+        self._save_button.bind("<Leave>", self._on_save_leave)
+        self._save_button.bind("<ButtonRelease-1>", self._trigger_save_flash)
+
     def set_save_command(self, callback) -> None:
         self._save_button.configure(command=callback)
 
@@ -226,6 +237,46 @@ class ConfigPanel(ctk.CTkFrame):
         self._save_cycle_index += 1
         self._save_button.configure(border_color=color)
         self.after(680, self._animate_save_button)
+
+    def _on_save_enter(self, _event) -> None:
+        self._save_hover = True
+        self._save_hover_phase = 0
+        if self._save_hover_after is None:
+            self._animate_save_hover()
+
+    def _on_save_leave(self, _event) -> None:
+        self._save_hover = False
+        if not self._save_flash_active:
+            self._save_button.configure(border_width=2)
+        if self._save_hover_after is not None and not self._save_flash_active:
+            self.after_cancel(self._save_hover_after)
+            self._save_hover_after = None
+
+    def _trigger_save_flash(self, _event) -> None:
+        self._save_flash_active = True
+        self._save_flash_phase = 0
+        if self._save_hover_after is None:
+            self._animate_save_hover()
+
+    def _animate_save_hover(self) -> None:
+        base_width = 2
+        width = base_width
+        if self._save_flash_active:
+            factor = math.sin(self._save_flash_phase / 8 * math.pi)
+            width = base_width + max(1, int(round(4 * abs(factor))))
+            self._save_flash_phase += 1
+            if self._save_flash_phase > 8:
+                self._save_flash_active = False
+        elif self._save_hover:
+            factor = (math.sin(self._save_hover_phase / 6 * math.tau) + 1) / 2
+            width = base_width + max(1, int(round(2 + factor * 2)))
+            self._save_hover_phase += 1
+        self._save_button.configure(border_width=width)
+        if self._save_hover or self._save_flash_active:
+            self._save_hover_after = self.after(90, self._animate_save_hover)
+        else:
+            self._save_hover_after = None
+            self._save_button.configure(border_width=base_width)
 
 
 class _Field(ctk.CTkLabel):

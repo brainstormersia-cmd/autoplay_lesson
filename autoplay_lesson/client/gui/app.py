@@ -37,6 +37,9 @@ class DarkPegasoApp(ctk.CTk):
         self._background_image = ctk.CTkImage(light_image=background, dark_image=background, size=(1600, 1000))
         self._background_label = ctk.CTkLabel(self, text="", image=self._background_image)
         self._background_label.place(relx=0.5, rely=0.5, anchor="center")
+        self._parallax_after: str | None = None
+        self._parallax_strength = 0.014
+        self.bind("<Motion>", self._handle_parallax)
 
         self._header = Header(self, version=self.VERSION)
         self._header.grid(row=0, column=0, sticky="ew")
@@ -82,6 +85,26 @@ class DarkPegasoApp(ctk.CTk):
 
         self._load_config()
         self._switch_idle_state()
+
+    def _handle_parallax(self, event) -> None:
+        """Offset the neon background slightly following the cursor."""
+
+        if not self.winfo_width() or not self.winfo_height():
+            return
+        rel_x = event.x / max(1, self.winfo_width()) - 0.5
+        rel_y = event.y / max(1, self.winfo_height()) - 0.5
+        offset_x = rel_x * self._parallax_strength
+        offset_y = rel_y * self._parallax_strength
+        self._background_label.place(relx=0.5 - offset_x, rely=0.5 - offset_y, anchor="center")
+        if self._parallax_after is not None:
+            self.after_cancel(self._parallax_after)
+        self._parallax_after = self.after(1600, self._reset_parallax)
+
+    def _reset_parallax(self) -> None:
+        """Restore the background to its default centered position."""
+
+        self._parallax_after = None
+        self._background_label.place(relx=0.5, rely=0.5, anchor="center")
 
     def _switch_idle_state(self) -> None:
         self._dashboard.status_card.update_status("● Pronto", styles.palette.success)
