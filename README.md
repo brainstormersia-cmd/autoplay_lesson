@@ -43,18 +43,54 @@ Opzioni principali:
 
 Il comando stampa subito il riepilogo della configurazione attiva e salva lo stato della riproduzione in `.state.json` per poter riprendere dall'ultima lezione completata.
 
-## Interfaccia grafica
+## DarkPegaso Control Center (GUI desktop)
 
-Esegui `python -m autoplay_lesson --gui` per aprire una finestra con i campi principali:
+È disponibile un client desktop basato su **CustomTkinter** con sidebar, dashboard riepilogativa, pannello configurazione e console log. Per avviarlo:
 
-- URL del corso.
-- Capitolo di partenza (1-based).
-- Checkbox per modalità headless, uso profilo Chrome, modalità diagnostica.
-- Parametri numerici `after-play`, `buffer`, `slow`.
-- Pulsanti **Start** e **Stop**.
-- Area log scrollabile che mostra tutti gli eventi in tempo reale.
+```bash
+python -m autoplay_lesson.client.main
+```
 
-Lo **Start** valida i campi, avvia Playwright in un thread dedicato e mostra il riepilogo della configurazione direttamente nel log. Il pulsante **Stop** invia una richiesta di arresto sicuro che chiude pagina, contesto e browser rilasciando le risorse senza eccezioni pendenti.
+Caratteristiche principali della finestra:
+
+- Sidebar per passare rapidamente da Dashboard, Configurazione, Stato & Log e Guida rapida.
+- Pulsante centrale **AVVIA AUTOMAZIONE** / **FERMA BOT** con log immediato nel pannello sottostante.
+- Barra di progresso con percentuale/ETA e console log monospace con colori distinti per info, successi, avvisi ed errori.
+- Schede di stato avanzate (lezioni completate, tempo medio, lezione attuale) nel tab "Stato & Log".
+- Form di configurazione con salvataggio su `config.json` (username, password, modalità corso, velocità ed opzioni aggiuntive).
+
+Tutte le impostazioni salvate vengono ricaricate automaticamente all'avvio successivo. Il client non richiede più servizi esterni (licenze/API) e può quindi essere eseguito completamente offline.
+
+Per chiudere rapidamente l'applicazione puoi premere **Esc** o selezionare "Esci" dalla sidebar.
+
+## Creare l'eseguibile Windows (.exe)
+
+Per distribuire il client come applicazione Windows autonoma puoi utilizzare **PyInstaller**:
+
+1. Prepara un ambiente virtuale e installa le dipendenze:
+
+   ```bash
+   py -m venv .venv
+   .venv\\Scripts\\activate
+   pip install --upgrade pip
+   pip install -r requirements.txt pyinstaller
+   ```
+
+2. Genera l'eseguibile:
+
+   ```bash
+   pyinstaller \
+     --name DarkPegaso \
+     --windowed \
+     --onefile \
+     autoplay_lesson\\autoplay_lesson\\client\\main.py
+   ```
+
+   > Se vuoi un'icona personalizzata convertila in formato `.ico` (es. con Inkscape o ImageMagick) e aggiungi l'opzione `--icon percorso\\logo.ico`.
+
+3. Il file `dist/DarkPegaso.exe` è pronto per essere distribuito. Mantieni accanto eventuali file di configurazione (`config.json`) se vuoi fornire preset precompilati.
+
+Per ripetere la build da zero elimina le cartelle `build/`, `dist/` e il file `.spec` generato da PyInstaller.
 
 ## Modalità diagnostica
 

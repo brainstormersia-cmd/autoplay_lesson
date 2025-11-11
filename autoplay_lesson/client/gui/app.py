@@ -12,7 +12,6 @@ from autoplay_lesson.client.gui.components.dashboard import Dashboard
 from autoplay_lesson.client.gui.components.footer import Footer
 from autoplay_lesson.client.gui.components.header import Header
 from autoplay_lesson.client.gui.components.help_panel import HelpPanel
-from autoplay_lesson.client.gui.components.license_banner import LicenseBanner
 from autoplay_lesson.client.gui.components.sidebar import Sidebar
 from autoplay_lesson.client.gui.components.status_panel import StatusPanel
 
@@ -50,11 +49,8 @@ class DarkPegasoApp(ctk.CTk):
 
         self._content = ctk.CTkFrame(self, fg_color=styles.palette.background_primary)
         self._content.grid(row=1, column=1, sticky="nsew")
-        self._content.grid_rowconfigure(1, weight=1)
+        self._content.grid_rowconfigure(0, weight=1)
         self._content.grid_columnconfigure(0, weight=1)
-
-        self._license_banner = LicenseBanner(self._content)
-        self._license_banner.grid(row=0, column=0, sticky="ew", padx=24, pady=(24, 16))
 
         self._dashboard = Dashboard(self._content)
         self._config = ConfigPanel(self._content)
@@ -68,7 +64,7 @@ class DarkPegasoApp(ctk.CTk):
             "help": self._help,
         }
         for panel in self._panels.values():
-            panel.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 24))
+            panel.grid(row=0, column=0, sticky="nsew", padx=24, pady=24)
             panel.grid_remove()
 
         self._footer = Footer(self)
@@ -115,8 +111,6 @@ class DarkPegasoApp(ctk.CTk):
         self._config.verbose_var.set(config.get("verbose", True))
         self._config.skip_pdf_var.set(config.get("skip_pdf", False))
         self._config.sound_var.set(config.get("sound", False))
-        tier = config.get("license_tier", "free")
-        self._license_banner.set_tier(tier)
 
     def _toggle_bot(self) -> None:
         if self._bot.is_running:
