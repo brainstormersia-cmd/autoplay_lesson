@@ -20,13 +20,13 @@ class Dashboard(ctk.CTkFrame):
         self.columnconfigure(0, weight=1)
 
         self._status_card = _StatusCard(self)
-        self._status_card.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        self._status_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
 
         self._control = _ControlCard(self)
-        self._control.grid(row=1, column=0, sticky="ew")
+        self._control.grid(row=1, column=0, sticky="ew", pady=(0, 12))
 
         self._progress = GlowProgressBar(self)
-        self._progress.grid(row=2, column=0, sticky="ew", pady=16)
+        self._progress.grid(row=2, column=0, sticky="ew", pady=(0, 12))
 
         self._log = LogConsole(self)
         self._log.grid(row=3, column=0, sticky="nsew")
@@ -109,16 +109,44 @@ class _ControlCard(ctk.CTkFrame):
         super().__init__(master, fg_color=styles.palette.background_secondary, corner_radius=12)
         self.columnconfigure(0, weight=1)
 
+        self.columnconfigure(0, weight=1)
+        self.columnconfigure(1, weight=0)
+
+        self._hint = ctk.CTkLabel(
+            self,
+            text=(
+                "Verifica che link, username e password siano compilati poi avvia il bot."
+            ),
+            font=styles.typography.primary,
+            text_color=styles.palette.text_secondary,
+            anchor="w",
+            justify="left",
+            padx=16,
+            wraplength=520,
+        )
+        self._hint.grid(row=0, column=0, sticky="nw", padx=16, pady=16)
+
         self._button = ctk.CTkButton(
             self,
             text="🚀  AVVIA AUTOMAZIONE",
             font=styles.typography.primary_semibold,
-            height=64,
+            height=56,
             corner_radius=16,
             fg_color=styles.palette.accent_primary,
             hover_color=styles.palette.accent_secondary,
+            width=220,
         )
-        self._button.grid(row=0, column=0, padx=24, pady=24)
+        self._button.grid(row=0, column=1, sticky="ne", padx=(0, 16), pady=16)
+
+        self._course_label = ctk.CTkLabel(
+            self,
+            text="Corso collegato: nessun link impostato",
+            font=styles.typography.primary,
+            text_color=styles.palette.text_secondary,
+            anchor="w",
+            padx=16,
+        )
+        self._course_label.grid(row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 16))
 
     def configure_command(self, command) -> None:
         self._button.configure(command=command)
@@ -128,3 +156,11 @@ class _ControlCard(ctk.CTkFrame):
             self._button.configure(text="⏹️  FERMA BOT")
         else:
             self._button.configure(text="🚀  AVVIA AUTOMAZIONE")
+
+    def set_course(self, url: str) -> None:
+        text = url.strip()
+        if not text:
+            display = "nessun link impostato"
+        else:
+            display = text if len(text) <= 70 else text[:67] + "…"
+        self._course_label.configure(text=f"Corso collegato: {display}")

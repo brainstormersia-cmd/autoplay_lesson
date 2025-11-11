@@ -88,30 +88,33 @@ class DarkPegasoApp(ctk.CTk):
         self._sidebar.select(section_id)
 
     def _save_config(self) -> None:
+        url_value = self._config.url_var.get().strip()
         ConfigManager.save(
+            url=url_value,
             username=self._config.username_var.get(),
             password=self._config.password_var.get(),
             remember_me=self._config.remember_var.get(),
             course_mode=self._config.mode_var.get(),
-            speed=self._config.speed_var.get(),
             verbose=self._config.verbose_var.get(),
             skip_pdf=self._config.skip_pdf_var.get(),
             sound=self._config.sound_var.get(),
         )
+        self._dashboard.control_card.set_course(url_value)
         self._dashboard.log_console.append("✓ Configurazione salvata", category="success")
 
     def _load_config(self) -> None:
         config = ConfigManager.load()
         if not config:
             return
+        self._config.url_var.set(config.get("url", ""))
         self._config.username_var.set(config.get("username", ""))
         self._config.password_var.set(config.get("password", ""))
         self._config.remember_var.set(config.get("remember_me", False))
         self._config.mode_var.set(config.get("course_mode", "COMPLETE"))
-        self._config.speed_var.set(config.get("speed", 2.5))
         self._config.verbose_var.set(config.get("verbose", True))
         self._config.skip_pdf_var.set(config.get("skip_pdf", False))
         self._config.sound_var.set(config.get("sound", False))
+        self._dashboard.control_card.set_course(config.get("url", ""))
 
     def _toggle_bot(self) -> None:
         if self._bot.is_running:
@@ -119,10 +122,32 @@ class DarkPegasoApp(ctk.CTk):
             self._dashboard.control_card.set_running(False)
             self._dashboard.log_console.append("⏹️ Bot fermato", category="warning")
         else:
-            settings = ConfigManager.load()
-            if not settings.get("username") or not settings.get("password"):
-                self._dashboard.log_console.append("✗ Inserire credenziali valide", category="error")
+            current_values = {
+                "url": self._config.url_var.get().strip(),
+                "username": self._config.username_var.get(),
+                "password": self._config.password_var.get(),
+                "remember_me": self._config.remember_var.get(),
+                "course_mode": self._config.mode_var.get(),
+                "verbose": self._config.verbose_var.get(),
+                "skip_pdf": self._config.skip_pdf_var.get(),
+                "sound": self._config.sound_var.get(),
+            }
+
+            if not current_values["url"]:
+                self._dashboard.log_console.append(
+                    "✗ Incolla il link completo del corso nella Configurazione",
+                    category="error",
+                )
                 return
+            if not current_values["username"] or not current_values["password"]:
+                self._dashboard.log_console.append(
+                    "✗ Inserisci username e password del portale",
+                    category="error",
+                )
+                return
+            ConfigManager.save(**current_values)
+            self._dashboard.control_card.set_course(current_values["url"])
+            settings = ConfigManager.load()
             self._bot.start(settings)
             self._dashboard.control_card.set_running(True)
             self._dashboard.log_console.append("🚀 Bot avviato", category="action")

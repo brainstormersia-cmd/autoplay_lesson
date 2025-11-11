@@ -14,6 +14,7 @@ class Palette:
 
     background_primary: str = "#0B0B0F"
     background_secondary: str = "#16161D"
+    header_background: str = "#1C1C28"
     accent_primary: str = "#6A00FF"
     accent_secondary: str = "#3D00FF"
     success: str = "#00FF88"

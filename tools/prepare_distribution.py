@@ -38,11 +38,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _write_config_template(target: Path) -> None:
     template = {
+        "url": "",
         "username": "",
         "password": "",
         "remember_me": False,
         "course_mode": "COMPLETE",
-        "speed": 2.5,
         "verbose": True,
         "skip_pdf": False,
         "sound": False,
@@ -64,7 +64,7 @@ def _write_release_readme(target: Path, exe_name: str) -> None:
         Avvio rapido
         ------------
         1. Fai doppio click su {exe_name}.
-        2. Inserisci le credenziali nella sezione Configurazione.
+        2. Apri la sezione Configurazione e incolla il link completo del corso insieme alle credenziali.
         3. Premi "Avvia Automazione" dalla Dashboard.
 
         Suggerimenti di distribuzione

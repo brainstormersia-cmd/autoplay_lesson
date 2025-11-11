@@ -17,7 +17,8 @@ class Header(ctk.CTkFrame):
         super().__init__(
             master,
             height=60,
-            fg_color=styles.palette.background_primary,
+            fg_color=styles.palette.header_background,
+            border_width=0,
         )
         self.grid_propagate(False)
         self.columnconfigure(0, weight=0)
@@ -37,13 +38,28 @@ class Header(ctk.CTkFrame):
         )
         self._logo.grid(row=0, column=0, padx=(24, 12), pady=8, sticky="w")
 
-        self._title = ctk.CTkLabel(
+        title_frame = ctk.CTkFrame(
             self,
+            fg_color="transparent",
+        )
+        title_frame.grid(row=0, column=1, sticky="w")
+        title_frame.columnconfigure(0, weight=1)
+
+        self._title = ctk.CTkLabel(
+            title_frame,
             text="DarkPegaso",
             font=styles.typography.title,
             text_color=styles.palette.text_primary,
         )
-        self._title.grid(row=0, column=1, sticky="w")
+        self._title.grid(row=0, column=0, sticky="w")
+
+        subtitle = ctk.CTkLabel(
+            title_frame,
+            text="Control Center",
+            font=styles.typography.primary,
+            text_color=styles.palette.text_secondary,
+        )
+        subtitle.grid(row=1, column=0, sticky="w")
 
         self._version = ctk.CTkLabel(
             self,
@@ -52,6 +68,13 @@ class Header(ctk.CTkFrame):
             text_color=styles.palette.text_secondary,
         )
         self._version.grid(row=0, column=2, sticky="e", padx=24)
+
+        self._accent = ctk.CTkFrame(
+            self,
+            height=2,
+            fg_color=styles.palette.accent_primary,
+        )
+        self._accent.grid(row=1, column=0, columnspan=3, sticky="ew")
 
     def set_status_text(self, message: str) -> None:
         """Update the header's subtitle with a timestamped message."""

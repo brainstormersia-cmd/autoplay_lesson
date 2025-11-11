@@ -54,12 +54,22 @@ python -m autoplay_lesson.client.main
 Caratteristiche principali della finestra:
 
 - Sidebar per passare rapidamente da Dashboard, Configurazione, Stato & Log e Guida rapida.
-- Pulsante centrale **AVVIA AUTOMAZIONE** / **FERMA BOT** con log immediato nel pannello sottostante.
+- Pulsante rapido **AVVIA AUTOMAZIONE** / **FERMA BOT** in alto a destra con log immediato nel pannello sottostante.
 - Barra di progresso con percentuale/ETA e console log monospace con colori distinti per info, successi, avvisi ed errori.
 - Schede di stato avanzate (lezioni completate, tempo medio, lezione attuale) nel tab "Stato & Log".
-- Form di configurazione con salvataggio su `config.json` (username, password, modalità corso, velocità ed opzioni aggiuntive).
+- Form di configurazione con salvataggio su `config.json` (link corso, username, password, modalità e opzioni avanzate).
 
 Tutte le impostazioni salvate vengono ricaricate automaticamente all'avvio successivo. Il client non richiede più servizi esterni (licenze/API) e può quindi essere eseguito completamente offline.
+
+### Configurare il bot passo passo
+
+1. Apri la sezione **Configurazione** dalla sidebar.
+2. Incolla nel campo **Link del corso (URL)** l'indirizzo completo della pagina Pegaso/Multiversity che contiene le lezioni da automatizzare.
+3. Compila **Username Pegaso** e **Password Pegaso** esattamente come li useresti sul portale.
+4. (Opzionale) Attiva **Ricorda credenziali su questo dispositivo** solo se il PC è tuo e protetto.
+5. Seleziona la **Modalità corso** desiderata (Solo Quiz, Solo Corsi, Corsi + Quiz) e abilita eventuali opzioni avanzate.
+6. Premi **Salva Configurazione**: nella dashboard comparirà il link configurato pronto per l'avvio.
+7. Torna sulla **Dashboard** e usa il pulsante in alto a destra per avviare o fermare l'automazione.
 
 Per chiudere rapidamente l'applicazione puoi premere **Esc** o selezionare "Esci" dalla sidebar.
 
@@ -83,8 +93,9 @@ Per distribuire il client come applicazione Windows autonoma puoi utilizzare **P
    ```
 
 2. Inserisci (o verifica) il logo PNG in `autoplay_lesson/autoplay_lesson/client/assets/darkpegaso_logo.png`.
+3. Assicurati che `config.json` (se presente) contenga almeno i campi `url`, `username` e `password` valorizzati oppure distribuisci il file di esempio.
 
-3. Genera l'eseguibile includendo gli asset della GUI:
+4. Genera l'eseguibile includendo gli asset della GUI:
 
    ```bash
    pyinstaller \
@@ -97,7 +108,7 @@ Per distribuire il client come applicazione Windows autonoma puoi utilizzare **P
 
    > Se vuoi un'icona personalizzata convertila in formato `.ico` (es. con Inkscape o ImageMagick) e aggiungi l'opzione `--icon percorso\\logo.ico`.
 
-4. Il file `dist/DarkPegaso.exe` è pronto per essere distribuito. Mantieni accanto eventuali file di configurazione (`config.json`) se vuoi fornire preset precompilati.
+5. Il file `dist/DarkPegaso.exe` è pronto per essere distribuito. Mantieni accanto eventuali file di configurazione (`config.json`) se vuoi fornire preset precompilati.
 
 ### Preparare una cartella distribuibile
 

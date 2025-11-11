@@ -8,9 +8,11 @@ from autoplay_lesson.client.gui import styles
 
 HELP_TEXT = (
     "1️⃣ Vai in Configurazione\n"
-    "   Inserisci username e password\n"
+    "   Incolla il link completo del corso Pegaso\n"
+    "   Inserisci username e password del portale\n"
     "   Scegli la modalità desiderata\n\n"
-    "2️⃣ Torna al Dashboard\n"
+    "2️⃣ Torna alla Dashboard\n"
+    "   Verifica il riepilogo del corso\n"
     "   Clicca \"Avvia Automazione\"\n\n"
     "3️⃣ Monitora il progresso\n"
     "   Il bot completerà automaticamente\n"
