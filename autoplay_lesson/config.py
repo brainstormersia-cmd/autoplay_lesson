@@ -141,6 +141,21 @@ class RuntimeConfig:
             summary += f"  Override selettori: {overrides}\n"
         return summary
 
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> "RuntimeConfig":
+        """Create a :class:`RuntimeConfig` instance from a dictionary."""
+
+        kwargs = {key: value for key, value in data.items() if hasattr(cls, key)}
+        course_mode = kwargs.get("course_mode")
+        if isinstance(course_mode, str):
+            try:
+                kwargs["course_mode"] = CourseMode[course_mode.upper()]
+            except KeyError:
+                kwargs["course_mode"] = CourseMode.COMPLETE
+        if "url" not in kwargs:
+            kwargs["url"] = "https://esempio-corso"
+        return cls(**kwargs)
+
     def chapter_in_scope(self, index: int, *, number: Optional[int] = None) -> bool:
         """Return True if the chapter identified by ``index``/``number`` is in scope."""
 
