@@ -185,6 +185,7 @@ class LessonCandidate:
     locator: Locator
     bounding_box: Optional[dict[str, float]]
     is_quiz: bool
+    completion_hint: bool
     skip_reason: Optional[str]
 
     @property
@@ -450,12 +451,15 @@ def _title_skip_reason(
     config: RuntimeConfig,
     *,
     is_quiz: bool,
+    completion_hint: bool = False,
 ) -> Optional[str]:
     lowered = title.lower()
     for keyword in TITLE_EXCLUSIONS:
         if keyword in lowered:
             return f"titolo contiene '{keyword}'"
     if is_quiz:
+        if completion_hint and (progress is None or progress >= config.progress_threshold):
+            return "quiz già completato (indicatore pagina)"
         if config.course_mode == CourseMode.COURSES_ONLY:
             return "quiz escluso dalla modalità Solo Corsi"
     else:
@@ -568,6 +572,36 @@ def _duration_to_seconds(match: re.Match[str]) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
+
+async def _quiz_completion_hint(row: Locator, config: RuntimeConfig) -> bool:
+    try:
+        repeat_button = row.locator(":scope button:has-text(\"Ripeti\"), :scope a:has-text(\"Ripeti\"), :scope span:has-text(\"Ripeti\")")
+        if await repeat_button.count():
+            # Presence of a repeat action is a strong indicator that the quiz was already submitted.
+            return True
+    except PlaywrightError:
+        pass
+    try:
+        badge = row.locator(":scope span:has-text(\"Completato\"), :scope span:has-text(\"Superato\"), :scope div:has-text(\"Quiz completato\")")
+        if await badge.count():
+            return True
+    except PlaywrightError:
+        pass
+    try:
+        raw_text = (await row.inner_text(timeout=650)).strip().lower()
+    except PlaywrightError:
+        raw_text = ""
+    if not raw_text:
+        return False
+    if "quiz" in raw_text and any(keyword in raw_text for keyword in ("completato", "superato", "già svolto", "punteggio")):
+        return True
+    if "ripeti" in raw_text and "quiz" in raw_text:
+        return True
+    if "punteggio" in raw_text and "100%" in raw_text:
+        return True
+    return False
+
+
 async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: RuntimeConfig) -> list[LessonCandidate]:
     rows = bounds.container.locator(
         _selector(config, "lesson_row", LESSON_ROW_SELECTOR)
@@ -617,7 +651,14 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
         if progress is not None:
             progress_matches += 1
         is_quiz = _is_quiz_title(title_raw)
-        skip_reason = _title_skip_reason(title_raw, progress, config, is_quiz=is_quiz)
+        completion_hint = await _quiz_completion_hint(row, config) if is_quiz else False
+        skip_reason = _title_skip_reason(
+            title_raw,
+            progress,
+            config,
+            is_quiz=is_quiz,
+            completion_hint=completion_hint,
+        )
         candidate = LessonCandidate(
             title=title_raw,
             title_raw=title_raw,
@@ -627,6 +668,7 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
             locator=row,
             bounding_box=bbox,
             is_quiz=is_quiz,
+            completion_hint=completion_hint,
             skip_reason=skip_reason,
         )
         results.append(candidate)
@@ -1012,6 +1054,45 @@ async def wait_for_lesson(
 
 
 
+
+async def _course_view_available(page: Page, config: RuntimeConfig) -> bool:
+    try:
+        container = page.locator(_selector(config, "chapter_container", CHAPTER_CONTAINER_SELECTOR))
+        return await container.count() > 0
+    except PlaywrightError:
+        return False
+
+
+async def _recover_course_context(
+    page: Page, config: RuntimeConfig, logger, *, attempt: int = 1
+) -> bool:
+    current_url = "<sconosciuto>"
+    try:
+        current_url = page.url
+    except PlaywrightError:
+        pass
+    if attempt <= 1:
+        logger.warning("Schermata del corso non rilevata (URL attuale: %s). Presumo un cambio manuale e provo a ripristinare.", current_url)
+    else:
+        logger.warning("Ripristino schermata corso tentativo %s (URL attuale: %s)", attempt, current_url)
+    target = config.url
+    if not target:
+        logger.error("URL del corso non configurato: impossibile ripristinare la schermata")
+        return False
+    try:
+        await page.goto(target, wait_until="networkidle", timeout=int(config.navigation_timeout * 1000))
+    except PlaywrightTimeoutError:
+        logger.warning("Timeout durante il ripristino della pagina corso: proseguo comunque")
+    except PlaywrightError as exc:
+        logger.error("Errore durante il ripristino della pagina corso: %s", exc)
+        return False
+    try:
+        await page.wait_for_timeout(int(max(config.lesson_render_wait, 0.5) * 1000))
+    except PlaywrightError:
+        pass
+    return await _course_view_available(page, config)
+
+
 async def _run_course_once(
     page: Page,
     config: RuntimeConfig,
@@ -1021,7 +1102,27 @@ async def _run_course_once(
     watchdog: Optional[ActivityWatchdog] = None,
 ) -> bool:
     await ensure_cookies(page, logger)
-    chapters = await collect_chapter_bounds(page, logger, config)
+    chapters: list[ChapterBounds] = []
+    recovery_attempt = 0
+    while not chapters and recovery_attempt <= 1:
+        try:
+            chapters = await collect_chapter_bounds(page, logger, config)
+        except PlaywrightError:
+            chapters = []
+        if chapters:
+            break
+        recovery_attempt += 1
+        if watchdog:
+            watchdog.ping("ripristino contesto corso")
+        if not await _recover_course_context(page, config, logger, attempt=recovery_attempt):
+            break
+        await ensure_cookies(page, logger)
+    if not chapters:
+        logger.error("Impossibile individuare i capitoli del corso dopo il ripristino")
+        return False
+    if recovery_attempt:
+        suffix = "i" if recovery_attempt > 1 else "o"
+        logger.info("Ripristino schermata corso completato dopo %s tentativ%s", recovery_attempt, suffix)
     logger.info("Rilevati %s capitoli", len(chapters))
     if watchdog:
         watchdog.raise_if_expired()
