@@ -5,6 +5,7 @@ import asyncio
 import math
 import random
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Dict, Optional, Set, TYPE_CHECKING
 
 from playwright.async_api import Error as PlaywrightError, Locator, Page
@@ -23,6 +24,14 @@ WRONG_CLASS = "!bg-platform-red/10"
 SUBMIT_SELECTOR = "button.bg-platform-primary:has-text(\"Invia\")"
 RETRY_SELECTOR = "button.bg-platform-primary:has-text(\"Ripeti\")"
 EXECUTE_SELECTOR = "button.bg-white.border-platform-primary:has-text(\"Esegui\")"
+
+
+class _AttemptState(Enum):
+    READY = auto()
+    ALREADY_COMPLETED = auto()
+    UNAVAILABLE = auto()
+
+
 @dataclass(slots=True)
 class QuizOutcome:
     """Represents the result of a quiz attempt."""
@@ -85,34 +94,47 @@ class QuizSolver:
         last_correct = 0
 
         while attempt < self.MAX_ATTEMPTS and not self.stop_event.is_set():
+            state = await self._prepare_attempt()
+            if state is _AttemptState.ALREADY_COMPLETED:
+                self.logger.info(
+                    "Quiz: individuato solo 'Ripeti', quiz già completato: passo alla lezione successiva"
+                )
+                correct_count = await self._collect_results(total_questions)
+                if correct_count == 0 and total_questions > 0:
+                    correct_count = total_questions
+                return QuizOutcome(attempt, correct_count, total_questions, True)
+            if state is not _AttemptState.READY:
+                self.logger.warning(
+                    "Quiz: impossibile preparare il tentativo %s: interfaccia quiz non pronta",
+                    attempt + 1,
+                )
+                await self._human_pause(1.0)
+                continue
+
             attempt += 1
             if self.watchdog:
                 self.watchdog.raise_if_expired()
                 self.watchdog.ping(f"quiz tentativo {attempt}")
             self.logger.info("Quiz: tentativo %s/%s", attempt, self.MAX_ATTEMPTS)
 
-            if not await self._prepare_attempt():
-                self.logger.warning(
-                    "Quiz: impossibile preparare il tentativo %s: nessun pulsante 'Invia' o 'Ripeti'",
-                    attempt,
-                )
-                await self._human_pause(1.0)
-                continue
-
             await self._answer_questions(total_questions)
             if self.stop_event.is_set():
                 break
 
-            submitted = await self._submit_answers()
+            submitted, already_completed = await self._attempt_submission(total_questions)
+            if already_completed:
+                self.logger.info(
+                    "Quiz: riscontro 'Ripeti' dopo la compilazione, considero il quiz completato"
+                )
+                correct_count = await self._collect_results(total_questions)
+                if correct_count == 0 and total_questions > 0:
+                    correct_count = total_questions
+                return QuizOutcome(attempt, correct_count, total_questions, True)
             if not submitted:
-                if await self._handle_missing_submit():
-                    self.logger.info(
-                        "Quiz: 'Invia' assente al tentativo %s, riavvio tramite 'Ripeti'",
-                        attempt,
-                    )
-                    await self._human_pause(0.8)
-                    continue
-                self.logger.warning("Quiz: pulsante 'Invia' non trovato al tentativo %s", attempt)
+                self.logger.warning(
+                    "Quiz: pulsante 'Invia' non disponibile al tentativo %s nonostante tutte le risposte",
+                    attempt,
+                )
                 await self._human_pause(1.0)
                 continue
 
@@ -315,44 +337,61 @@ class QuizSolver:
             self.logger.debug("Quiz: click 'Invia' fallito: %s", exc)
         return False
 
-    async def _prepare_attempt(self) -> bool:
+    async def _prepare_attempt(self) -> _AttemptState:
         if self.stop_event.is_set():
-            return False
+            return _AttemptState.UNAVAILABLE
         submit_button = self.page.locator(SUBMIT_SELECTOR)
         try:
             if await submit_button.count():
-                return True
+                return _AttemptState.READY
         except PlaywrightError:
             pass
         retry_button = self.page.locator(RETRY_SELECTOR)
         try:
             if await retry_button.count():
-                self.logger.info("Quiz: quiz già completato, uso 'Ripeti' per riavviare")
-                if await self._retry_quiz():
-                    await self._wait_for_reset()
-                    await self._expand_collapsible_sections()
-                    try:
-                        if await submit_button.count():
-                            return True
-                    except PlaywrightError:
-                        pass
+                return _AttemptState.ALREADY_COMPLETED
         except PlaywrightError:
             pass
-        return False
-
-    async def _handle_missing_submit(self) -> bool:
-        if self.stop_event.is_set():
-            return False
-        retry = self.page.locator(RETRY_SELECTOR)
+        await self._expand_collapsible_sections(force=True)
         try:
-            if await retry.count():
-                if await self._retry_quiz():
-                    await self._wait_for_reset()
-                    await self._expand_collapsible_sections()
-                    return True
+            if await submit_button.count():
+                return _AttemptState.READY
+        except PlaywrightError:
+            pass
+        return _AttemptState.UNAVAILABLE
+
+    async def _attempt_submission(self, total_questions: int) -> tuple[bool, bool]:
+        submitted = await self._submit_answers()
+        if submitted:
+            return True, False
+        return await self._recover_missing_submit(total_questions)
+
+    async def _recover_missing_submit(self, total_questions: int) -> tuple[bool, bool]:
+        if self.stop_event.is_set():
+            return False, False
+        await self._ensure_all_answered(total_questions)
+        await self._expand_collapsible_sections(force=True)
+        submit_button = self.page.locator(SUBMIT_SELECTOR)
+        try:
+            if await submit_button.count():
+                if await self._safe_click(submit_button.first, "invio risposte (recupero)"):
+                    await self._human_pause(0.25)
+                    return True, False
         except PlaywrightError as exc:
-            self.logger.debug("Quiz: impossibile utilizzare 'Ripeti' in assenza di 'Invia': %s", exc)
-        return False
+            self.logger.debug("Quiz: click 'Invia' (recupero) fallito: %s", exc)
+        retry_button = self.page.locator(RETRY_SELECTOR)
+        try:
+            if await retry_button.count():
+                self.logger.info(
+                    "Quiz: trovato 'Ripeti' ma non 'Invia', interpreto il quiz come già completato"
+                )
+                return False, True
+        except PlaywrightError as exc:
+            self.logger.debug(
+                "Quiz: impossibile valutare presenza di 'Ripeti' durante il recupero: %s",
+                exc,
+            )
+        return False, False
 
     async def _collect_results(self, total_questions: int) -> int:
         questions = self.page.locator(QUIZ_CONTAINER_SELECTOR)

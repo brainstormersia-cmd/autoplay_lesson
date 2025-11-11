@@ -73,6 +73,19 @@ Tutte le impostazioni salvate vengono ricaricate automaticamente all'avvio succe
 
 Per chiudere rapidamente l'applicazione puoi premere **Esc** o selezionare "Esci" dalla sidebar.
 
+### Esecuzione su server esterno (Render, VPS, Hetzner, ecc.)
+
+Per server headless o VPS ti consigliamo la guida dedicata in [`docs/DEPLOY_RENDER.md`](docs/DEPLOY_RENDER.md). Oltre alla procedura per Render troverai:
+
+- una **checklist di comandi da terminale** copiabili per qualunque VPS Linux (apt, virtualenv, export variabili, avvio headless),
+- una sezione dedicata al **setup di Ubuntu Server 20.04/22.04** con installazione pacchetti, ambiente virtuale e servizio `systemd`,
+- le variabili d'ambiente consigliate per tenere le credenziali fuori dal codice,
+- i comandi di build/start pensati per Render,
+- un setup rapido passo passo per VPS Hetzner/Ubuntu, incluso esempio di servizio `systemd`,
+- suggerimenti per persistere lo stato, schedulare job e monitorare i log.
+
+Adattando il comando di avvio (`python -m autoplay_lesson ...`) e le variabili d'ambiente alla tua infrastruttura puoi replicare lo stesso flusso su Docker, orchestratori o server personali.
+
 ### Logo personalizzato
 
 - Inserisci il file PNG del logo in `autoplay_lesson/autoplay_lesson/client/assets/darkpegaso_logo.png` (consigliato 256×256px con sfondo trasparente).

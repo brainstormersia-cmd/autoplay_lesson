@@ -22,9 +22,11 @@ class Sidebar(ctk.CTkFrame):
     ) -> None:
         super().__init__(
             master,
-            fg_color=styles.palette.background_secondary,
+            fg_color=styles.palette.background_glass,
             width=width,
             corner_radius=0,
+            border_width=1,
+            border_color=styles.palette.soft_outline,
         )
         self._buttons: Dict[str, ctk.CTkButton] = {}
         self._current: str | None = None
@@ -49,7 +51,7 @@ class Sidebar(ctk.CTkFrame):
                 self,
                 text=f"{section['icon']}  {section['label']}",
                 fg_color="transparent",
-                hover_color=styles.palette.accent_primary,
+                hover_color=styles.palette.accent_secondary,
                 text_color=styles.palette.text_secondary,
                 anchor="w",
                 font=styles.typography.primary,
