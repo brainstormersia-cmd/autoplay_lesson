@@ -13,10 +13,66 @@ from playwright.async_api import (
 )
 
 from .browser import launch_browser, open_page
+from queue import Queue
+import threading
+
 from .config import RuntimeConfig
 from .logging_utils import configure_logging
 from .lessons import WatchdogExpired, run_course
 from .state import LessonState
+
+
+class AutomationRunner:
+    """Adapter used by the CustomTkinter shell.
+
+    The class wraps the asynchronous :class:`Runner` so the GUI can execute
+    the autoplay logic from a background thread while pushing feedback to the
+    interface via callbacks.
+    """
+
+    def __init__(self, log_callback, progress_callback) -> None:
+        self._log_callback = log_callback
+        self._progress_callback = progress_callback
+        self._runner: Runner | None = None
+        self._log_queue: Queue[str] = Queue()
+        self._drain_event = threading.Event()
+
+    def run(self, config_dict) -> None:
+        config = RuntimeConfig.from_dict(config_dict)
+        configure_logging(config, log_queue=self._log_queue)
+        self._start_drain_thread()
+        self._runner = Runner(config)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._runner.run())
+        finally:
+            loop.close()
+            self._stop_drain_thread()
+
+    def request_stop(self) -> None:
+        if self._runner is not None:
+            self._runner.stop_event.set()
+
+    def _start_drain_thread(self) -> None:
+        self._drain_event.clear()
+
+        def drain() -> None:
+            while not self._drain_event.is_set() or not self._log_queue.empty():
+                try:
+                    message = self._log_queue.get(timeout=0.1)
+                except Exception:
+                    continue
+                self._log_callback(message, "default")
+                self._log_queue.task_done()
+
+        self._drain_thread = threading.Thread(target=drain, daemon=True)
+        self._drain_thread.start()
+
+    def _stop_drain_thread(self) -> None:
+        self._drain_event.set()
+        if hasattr(self, "_drain_thread") and self._drain_thread.is_alive():
+            self._drain_thread.join(timeout=1)
 
 
 class CourseRecoveryError(RuntimeError):
