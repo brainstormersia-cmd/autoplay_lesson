@@ -43,18 +43,91 @@ Opzioni principali:
 
 Il comando stampa subito il riepilogo della configurazione attiva e salva lo stato della riproduzione in `.state.json` per poter riprendere dall'ultima lezione completata.
 
-## Interfaccia grafica
+## DarkPegaso Control Center (GUI desktop)
 
-Esegui `python -m autoplay_lesson --gui` per aprire una finestra con i campi principali:
+È disponibile un client desktop basato su **CustomTkinter** con sidebar, dashboard riepilogativa, pannello configurazione e console log. Per avviarlo:
 
-- URL del corso.
-- Capitolo di partenza (1-based).
-- Checkbox per modalità headless, uso profilo Chrome, modalità diagnostica.
-- Parametri numerici `after-play`, `buffer`, `slow`.
-- Pulsanti **Start** e **Stop**.
-- Area log scrollabile che mostra tutti gli eventi in tempo reale.
+```bash
+python -m autoplay_lesson.client.main
+```
 
-Lo **Start** valida i campi, avvia Playwright in un thread dedicato e mostra il riepilogo della configurazione direttamente nel log. Il pulsante **Stop** invia una richiesta di arresto sicuro che chiude pagina, contesto e browser rilasciando le risorse senza eccezioni pendenti.
+Caratteristiche principali della finestra:
+
+- Sidebar per passare rapidamente da Dashboard, Configurazione, Stato & Log e Guida rapida.
+- Pulsante rapido **AVVIA AUTOMAZIONE** / **FERMA BOT** in alto a destra con log immediato nel pannello sottostante.
+- Barra di progresso con percentuale/ETA e console log monospace con colori distinti per info, successi, avvisi ed errori.
+- Schede di stato avanzate (lezioni completate, tempo medio, lezione attuale) nel tab "Stato & Log".
+- Form di configurazione con salvataggio su `config.json` (link corso, username, password, modalità e opzioni avanzate).
+
+Tutte le impostazioni salvate vengono ricaricate automaticamente all'avvio successivo. Il client non richiede più servizi esterni (licenze/API) e può quindi essere eseguito completamente offline.
+
+### Configurare il bot passo passo
+
+1. Apri la sezione **Configurazione** dalla sidebar.
+2. Incolla nel campo **Link del corso (URL)** l'indirizzo completo della pagina Pegaso/Multiversity che contiene le lezioni da automatizzare.
+3. Compila **Username Pegaso** e **Password Pegaso** esattamente come li useresti sul portale.
+4. (Opzionale) Attiva **Ricorda credenziali su questo dispositivo** solo se il PC è tuo e protetto.
+5. Seleziona la **Modalità corso** desiderata (Solo Quiz, Solo Corsi, Corsi + Quiz) e abilita eventuali opzioni avanzate.
+6. Premi **Salva Configurazione**: nella dashboard comparirà il link configurato pronto per l'avvio.
+7. Torna sulla **Dashboard** e usa il pulsante in alto a destra per avviare o fermare l'automazione.
+
+Per chiudere rapidamente l'applicazione puoi premere **Esc** o selezionare "Esci" dalla sidebar.
+
+### Logo personalizzato
+
+- Inserisci il file PNG del logo in `autoplay_lesson/autoplay_lesson/client/assets/darkpegaso_logo.png` (consigliato 256×256px con sfondo trasparente).
+- In alternativa imposta la variabile d'ambiente `DARKPEGASO_LOGO` con il percorso di un'immagine esterna.
+- Se non viene trovato alcun file, l'app genera automaticamente un logo placeholder in stile neon.
+
+## Creare l'eseguibile Windows (.exe)
+
+Per distribuire il client come applicazione Windows autonoma puoi utilizzare **PyInstaller**:
+
+1. Prepara un ambiente virtuale e installa le dipendenze:
+
+   ```bash
+   py -m venv .venv
+   .venv\\Scripts\\activate
+   pip install --upgrade pip
+   pip install -r requirements.txt pyinstaller
+   ```
+
+2. Inserisci (o verifica) il logo PNG in `autoplay_lesson/autoplay_lesson/client/assets/darkpegaso_logo.png`.
+3. Assicurati che `config.json` (se presente) contenga almeno i campi `url`, `username` e `password` valorizzati oppure distribuisci il file di esempio.
+
+4. Genera l'eseguibile includendo gli asset della GUI:
+
+   ```bash
+   pyinstaller \
+     --name DarkPegaso \
+     --windowed \
+     --onefile \
+     --add-data "autoplay_lesson/autoplay_lesson/client/assets;autoplay_lesson/client/assets" \
+     autoplay_lesson\\autoplay_lesson\\client\\main.py
+   ```
+
+   > Se vuoi un'icona personalizzata convertila in formato `.ico` (es. con Inkscape o ImageMagick) e aggiungi l'opzione `--icon percorso\\logo.ico`.
+
+5. Il file `dist/DarkPegaso.exe` è pronto per essere distribuito. Mantieni accanto eventuali file di configurazione (`config.json`) se vuoi fornire preset precompilati.
+
+### Preparare una cartella distribuibile
+
+Per consegnare il programma a collaboratori o clienti puoi creare una cartella preconfigurata con logo, template di configurazione e guida rapida:
+
+```bash
+python tools/prepare_distribution.py
+```
+
+Il comando produce `release/DarkPegaso_1_0_0/` con i seguenti contenuti:
+
+- `DarkPegaso.exe`: l'eseguibile PyInstaller copiato da `dist/`.
+- `assets/darkpegaso_logo.png`: logo PNG (o placeholder generato automaticamente se non presente).
+- `config.json.example`: esempio di configurazione pronta da rinominare.
+- `README.txt`: istruzioni rapide per chi riceve la cartella.
+
+Puoi comprimere la cartella risultante in `.zip` e distribuirla direttamente.
+
+Per ripetere la build da zero elimina le cartelle `build/`, `dist/` e il file `.spec` generato da PyInstaller.
 
 ## Modalità diagnostica
 
