@@ -24,6 +24,26 @@ from .state import LessonState
 LS = LESSON_SELECTORS
 OS = OVERLAY_SELECTORS
 
+OVERLAY_CANDIDATE_SELECTORS: tuple[str, ...] = (
+    "div.fixed.inset-0",
+    "div.fixed.top-0.left-0.right-0.bottom-0",
+    "div.fixed[class*='z-']",
+    "div[class*='bg-black\\/20'][class*='fixed']",
+    "div[class*='overlay'][class*='fixed']",
+    "div[class*='modal'][class*='fixed']",
+)
+
+OVERLAY_BUTTON_LABELS: tuple[str, ...] = (
+    "Chiudi",
+    "Chiudi X",
+    "Close",
+    "Ok",
+    "OK",
+    "Continua",
+    "Ho capito",
+    "Comprendo",
+)
+
 
 def _selector(config: RuntimeConfig, key: str, default: str) -> str:
     return config.selector_overrides.get(key, default)
