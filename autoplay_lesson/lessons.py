@@ -18,28 +18,11 @@ from playwright.async_api import (
 
 from .config import CourseMode, DURATION_PATTERN, RuntimeConfig
 from .quizzes import QuizSolver
+from .selectors import LESSON_SELECTORS, OVERLAY_SELECTORS
 from .state import LessonState
 
-TITLE_EXCLUSIONS = ("dispensa", "obiettivi")
-QUIZ_KEYWORDS = ("test di fine lezione",)
-LESSON_ROW_SELECTOR = ":scope div.border-t.hover\\:bg-platform-hover-light"
-TITLE_SELECTOR = ":scope div.mb-2, :scope span.font-semibold, :scope .text-base .mb-2, :scope div.font-semibold, :scope h3, :scope h4"
-DURATION_SELECTOR = ":scope div.text-sm.text-platform-gray, :scope span.text-sm, :scope span.text-xs"
-PERCENTAGE_SELECTOR = (
-    ":scope div.w-1\\/12.text-xs, :scope div.w-1\\/12.md\\:text-xs, :scope span.text-xs, :scope span.text-sm"
-)
-PROGRESS_COMPLETE_SELECTOR = ":scope .bg-platform-green[style*='width: 100%'], :scope .bg-platform-primary[style*='width: 100%']"
-CHAPTER_CONTAINER_SELECTOR = "div.bg-white.text-base.border.font-sans.font-semibold"
-CHAPTER_HEADER_SELECTOR = (
-    "div.bg-white.text-base.border div.cursor-pointer, "
-    "div.bg-white.text-base.border svg + div, "
-    "div.bg-white.text-base.border:has(svg), "
-    "div.bg-white.text-base.border div[role='button'], "
-    "div.flex.items-center.font-medium:has(svg)"
-)
-VIDEO_BLOCK_HEADER_TEXT = "Riproduzione del video non consentita"
-VIDEO_BLOCK_HEADER_SELECTOR = "h3.text-2xl.font-medium.mt-4.whitespace-pre-line"
-VIDEO_BLOCK_CONFIRM_SELECTOR = "button.bg-platform-primary.text-white"
+LS = LESSON_SELECTORS
+OS = OVERLAY_SELECTORS
 
 OVERLAY_CANDIDATE_SELECTORS: tuple[str, ...] = (
     "div.fixed.inset-0",
@@ -76,7 +59,7 @@ def _titles_equal(first: str, second: str) -> bool:
 
 def _is_quiz_title(title: str) -> bool:
     lowered = title.lower()
-    return any(keyword in lowered for keyword in QUIZ_KEYWORDS)
+    return any(keyword in lowered for keyword in LS.quiz_keywords)
 
 
 def _extract_chapter_number(title: str) -> Optional[int]:
@@ -374,7 +357,7 @@ async def dismiss_video_restriction_popup(page: Page, config: RuntimeConfig, log
 
     try:
         header = page.locator(
-            f"{VIDEO_BLOCK_HEADER_SELECTOR}:has-text('{VIDEO_BLOCK_HEADER_TEXT}')"
+            f"{LS.video_block_header}:has-text('{LS.video_block_header_text}')"
         )
     except PlaywrightError:
         return False
@@ -387,7 +370,7 @@ async def dismiss_video_restriction_popup(page: Page, config: RuntimeConfig, log
     logger.warning("Popup 'Riproduzione del video non consentita' rilevato")
 
     button = page.locator(
-        f"{VIDEO_BLOCK_CONFIRM_SELECTOR}:has-text('OK')"
+        f"{LS.video_block_confirm}:has-text('OK')"
     )
     try:
         if await button.count():
@@ -420,7 +403,7 @@ async def dismiss_video_restriction_popup(page: Page, config: RuntimeConfig, log
 
 async def _detect_blocking_overlays(page: Page) -> list[Locator]:
     overlays: list[Locator] = []
-    for selector in OVERLAY_CANDIDATE_SELECTORS:
+    for selector in OS.candidates:
         try:
             candidate = page.locator(selector)
         except PlaywrightError:
@@ -430,12 +413,34 @@ async def _detect_blocking_overlays(page: Page) -> list[Locator]:
         except PlaywrightError:
             continue
         if count:
-            overlays.append(candidate.first)
+            overlay = candidate.first
+            try:
+                bbox = await overlay.bounding_box()
+            except PlaywrightError:
+                bbox = None
+            if bbox and bbox.get("width", 0) <= 20 and bbox.get("height", 0) <= 20:
+                continue
+            try:
+                pointer_enabled = await overlay.evaluate(
+                    "el => getComputedStyle(el).pointerEvents !== 'none'"
+                )
+            except PlaywrightError:
+                pointer_enabled = True
+            if not pointer_enabled:
+                continue
+            overlays.append(overlay)
     return overlays
 
 
-async def _dismiss_blocking_overlay(page: Page, logger, *, context: str) -> bool:
-    overlays = await _detect_blocking_overlays(page)
+async def _dismiss_blocking_overlay(
+    page: Page,
+    logger,
+    *,
+    context: str,
+    overlays: Optional[list[Locator]] = None,
+) -> bool:
+    if overlays is None:
+        overlays = await _detect_blocking_overlays(page)
     if not overlays:
         return False
     logger.warning(
@@ -447,7 +452,7 @@ async def _dismiss_blocking_overlay(page: Page, logger, *, context: str) -> bool
         return bool(detected)
 
     for overlay in overlays:
-        for label in OVERLAY_BUTTON_LABELS:
+        for label in OS.button_labels:
             try:
                 button = overlay.locator(f"button:has-text('{label}')").first
                 if await button.count():
@@ -627,7 +632,7 @@ async def _apply_course_recovery(
 
 async def collect_chapter_bounds(page: Page, logger, config: RuntimeConfig) -> list[ChapterBounds]:
     containers = page.locator(
-        _selector(config, "chapter_container", CHAPTER_CONTAINER_SELECTOR)
+        _selector(config, "chapter_container", LS.chapter_container)
     )
     count = await containers.count()
     results: list[ChapterBounds] = []
@@ -635,7 +640,7 @@ async def collect_chapter_bounds(page: Page, logger, config: RuntimeConfig) -> l
     for idx in range(count):
         container = containers.nth(idx)
         header_locator = container.locator(
-            _selector(config, "chapter_header", CHAPTER_HEADER_SELECTOR)
+            _selector(config, "chapter_header", LS.chapter_header)
         )
         header_count = await header_locator.count()
         click_target = header_locator.first if header_count else container
@@ -689,7 +694,7 @@ def _title_skip_reason(
     completion_hint: bool = False,
 ) -> Optional[str]:
     lowered = title.lower()
-    for keyword in TITLE_EXCLUSIONS:
+    for keyword in LS.title_exclusions:
         if keyword in lowered:
             return f"titolo contiene '{keyword}'"
     if is_quiz:
@@ -712,7 +717,9 @@ def _title_skip_reason(
 
 async def _extract_percentage(row: Locator, config: RuntimeConfig) -> Optional[int]:
     try:
-        cell_locator = row.locator(_selector(config, "percentage", PERCENTAGE_SELECTOR))
+        cell_locator = row.locator(
+            _selector(config, "percentage", LS.percentage)
+        )
         for idx in range(await cell_locator.count()):
             try:
                 text = (await cell_locator.nth(idx).inner_text(timeout=750)).strip()
@@ -742,7 +749,7 @@ async def _extract_percentage(row: Locator, config: RuntimeConfig) -> Optional[i
         pass
     try:
         complete_locator = row.locator(
-            _selector(config, "progress_complete", PROGRESS_COMPLETE_SELECTOR)
+            _selector(config, "progress_complete", LS.progress_complete)
         )
         if await complete_locator.count():
             return 100
@@ -776,7 +783,9 @@ async def _extract_percentage(row: Locator, config: RuntimeConfig) -> Optional[i
 
 async def _extract_duration(row: Locator, config: RuntimeConfig) -> tuple[Optional[str], Optional[int]]:
     try:
-        duration_locator = row.locator(_selector(config, "duration", DURATION_SELECTOR))
+        duration_locator = row.locator(
+            _selector(config, "duration", LS.duration)
+        )
         for idx in range(await duration_locator.count()):
             try:
                 label = (await duration_locator.nth(idx).inner_text(timeout=750)).strip()
@@ -839,7 +848,7 @@ async def _quiz_completion_hint(row: Locator, config: RuntimeConfig) -> bool:
 
 async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: RuntimeConfig) -> list[LessonCandidate]:
     rows = bounds.container.locator(
-        _selector(config, "lesson_row", LESSON_ROW_SELECTOR)
+        _selector(config, "lesson_row", LS.lesson_row)
     )
     results: list[LessonCandidate] = []
     title_matches = 0
@@ -868,7 +877,9 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
         # coordinate-based filtering; we keep the bounding box only for
         # diagnostic purposes.
         try:
-            title_locator = row.locator(_selector(config, "lesson_title", TITLE_SELECTOR)).first
+            title_locator = row.locator(
+                _selector(config, "lesson_title", LS.title)
+            ).first
             title_raw = (await title_locator.inner_text(timeout=1000)).strip()
         except PlaywrightError:
             title_raw = ""
@@ -950,7 +961,7 @@ async def _prime_chapter_content(
     except PlaywrightError:
         pass
     lesson_locator = bounds.container.locator(
-        _selector(config, "lesson_row", LESSON_ROW_SELECTOR)
+        _selector(config, "lesson_row", LS.lesson_row)
     )
     last_count = -1
     stable_rounds = 0
@@ -1129,19 +1140,32 @@ async def click_with_retry(
             )
             if page is not None and "intercepts pointer events" in str(exc).lower():
                 try:
-                    closed = await _dismiss_blocking_overlay(
-                        page, logger, context=f"click {description}"
-                    )
+                    overlays = await _detect_blocking_overlays(page)
                 except PlaywrightError:
-                    closed = False
-                if closed:
-                    logger.info(
-                        "Overlay gestito dopo il fallimento del click %s: nuovo tentativo",
+                    overlays = []
+                if overlays:
+                    overlay_detected = True
+                    try:
+                        closed = await _dismiss_blocking_overlay(
+                            page,
+                            logger,
+                            context=f"click {description}",
+                            overlays=overlays,
+                        )
+                    except PlaywrightError:
+                        closed = False
+                    if closed:
+                        logger.info(
+                            "Overlay gestito dopo il fallimento del click %s: nuovo tentativo",
+                            description,
+                        )
+                        await asyncio.sleep(0.2)
+                        continue
+                else:
+                    logger.debug(
+                        "Intercettato pointer events senza overlay visibili per %s",
                         description,
                     )
-                    await asyncio.sleep(0.2)
-                    continue
-                overlay_detected = True
             if page is not None:
                 try:
                     await page.wait_for_timeout(150)
@@ -1312,7 +1336,9 @@ async def wait_for_lesson(
 
 async def _course_view_available(page: Page, config: RuntimeConfig) -> bool:
     try:
-        container = page.locator(_selector(config, "chapter_container", CHAPTER_CONTAINER_SELECTOR))
+        container = page.locator(
+            _selector(config, "chapter_container", LS.chapter_container)
+        )
         return await container.count() > 0
     except PlaywrightError:
         return False
@@ -1825,7 +1851,7 @@ async def _verify_course_completion(
             watchdog.ping(f"verifica lezioni {chapter_label}")
         for lesson in lessons:
             lowered = lesson.title.lower()
-            if any(keyword in lowered for keyword in TITLE_EXCLUSIONS):
+            if any(keyword in lowered for keyword in LS.title_exclusions):
                 continue
             if lesson.skip_reason and not lesson.skip_reason.startswith("progress"):
                 continue
