@@ -24,6 +24,16 @@ WRONG_CLASS = "!bg-platform-red/10"
 SUBMIT_SELECTOR = "button.bg-platform-primary:has-text(\"Invia\")"
 RETRY_SELECTOR = "button.bg-platform-primary:has-text(\"Ripeti\")"
 EXECUTE_SELECTOR = "button.bg-white.border-platform-primary:has-text(\"Esegui\")"
+ALTERNATE_EXECUTE_SELECTORS = (
+    "button.bg-platform-primary:has-text(\"Esegui\")",
+    "button:has-text(\"Avvia\")",
+    "button:has-text(\"Continua\")",
+    "button:has-text(\"Prosegui\")",
+    "button:has-text(\"Inizia\")",
+    "[role='button']:has-text(\"Avvia\")",
+    "[role='button']:has-text(\"Continua\")",
+    "[role='button']:has-text(\"Prosegui\")",
+)
 
 
 class _AttemptState(Enum):
@@ -63,11 +73,20 @@ class QuizSolver:
         self.stop_event = stop_event
         self.watchdog = watchdog
         self.correct_answers: Dict[int, int] = {}
+        self.correct_questions: Set[int] = set()
         self.wrong_answers: Dict[int, set[int]] = {}
         self._touched_sections: Set[int] = set()
+        self._reuse_correct_answers = False
 
     async def solve(self) -> QuizOutcome:
         """Attempt to solve the quiz, returning the final outcome."""
+
+        self.logger.info("QUIZ_START: scansione interfaccia quiz")
+        self.correct_answers.clear()
+        self.correct_questions.clear()
+        self.wrong_answers.clear()
+        self._touched_sections.clear()
+        self._reuse_correct_answers = False
 
         try:
             await self._ensure_quiz_started()
@@ -96,18 +115,18 @@ class QuizSolver:
         while attempt < self.MAX_ATTEMPTS and not self.stop_event.is_set():
             state = await self._prepare_attempt()
             if state is _AttemptState.ALREADY_COMPLETED:
-                self.logger.info(
-                    "Quiz: individuato solo 'Ripeti', quiz già completato: passo alla lezione successiva"
-                )
+                self.logger.info("RIPETI_PRESENT -> SKIP")
                 correct_count = await self._collect_results(total_questions)
                 if correct_count == 0 and total_questions > 0:
                     correct_count = total_questions
+                self.logger.info("NEXT_MODULE_OK")
                 return QuizOutcome(attempt, correct_count, total_questions, True)
             if state is not _AttemptState.READY:
                 self.logger.warning(
                     "Quiz: impossibile preparare il tentativo %s: interfaccia quiz non pronta",
                     attempt + 1,
                 )
+                await self._reset_interface()
                 await self._human_pause(1.0)
                 continue
 
@@ -117,26 +136,30 @@ class QuizSolver:
                 self.watchdog.ping(f"quiz tentativo {attempt}")
             self.logger.info("Quiz: tentativo %s/%s", attempt, self.MAX_ATTEMPTS)
 
-            await self._answer_questions(total_questions)
+            await self._answer_questions(total_questions, reuse_correct=self._reuse_correct_answers)
             if self.stop_event.is_set():
                 break
 
             submitted, already_completed = await self._attempt_submission(total_questions)
             if already_completed:
                 self.logger.info(
-                    "Quiz: riscontro 'Ripeti' dopo la compilazione, considero il quiz completato"
+                    "RIPETI_PRESENT -> SKIP (dopo invio), considero il quiz completato"
                 )
                 correct_count = await self._collect_results(total_questions)
                 if correct_count == 0 and total_questions > 0:
                     correct_count = total_questions
+                self.logger.info("NEXT_MODULE_OK")
                 return QuizOutcome(attempt, correct_count, total_questions, True)
             if not submitted:
                 self.logger.warning(
                     "Quiz: pulsante 'Invia' non disponibile al tentativo %s nonostante tutte le risposte",
                     attempt,
                 )
+                await self._reset_interface()
                 await self._human_pause(1.0)
                 continue
+
+            self.logger.info("INVIA_OK")
 
             try:
                 await self._human_pause(1.2)
@@ -158,6 +181,7 @@ class QuizSolver:
                 required_correct is not None and correct_count >= required_correct
             )
             if threshold_reached or all_correct:
+                self.logger.info("NEXT_MODULE_OK")
                 return QuizOutcome(attempt, correct_count, total_questions, True)
 
             if required_correct is None:
@@ -166,8 +190,17 @@ class QuizSolver:
                     correct_count,
                     total_questions,
                 )
+                self.logger.info("NEXT_MODULE_OK")
                 return QuizOutcome(attempt, correct_count, total_questions, True)
 
+            if not self._reuse_correct_answers:
+                self.logger.info(
+                    "BLOCK_REQUIRES_THRESHOLD: %s/%s < %s",
+                    correct_count,
+                    total_questions,
+                    required_correct,
+                )
+            self._reuse_correct_answers = True
             try:
                 await asyncio.sleep(self._adjusted_delay(0.8))
             except asyncio.CancelledError:  # pragma: no cover
@@ -176,22 +209,24 @@ class QuizSolver:
             if self.stop_event.is_set():
                 break
 
+            self.logger.info(
+                "IMPROVE_SCORE_ATTEMPT %s/%s (corrette note: %s)",
+                attempt + 1,
+                self.MAX_ATTEMPTS,
+                len(self.correct_questions),
+            )
             if not await self._retry_quiz():
                 self.logger.error("Quiz: pulsante 'Ripeti' non disponibile")
                 break
 
             await self._wait_for_reset()
 
+        if attempt >= self.MAX_ATTEMPTS:
+            self.logger.error("MAX_TENTATIVI_REACHED: %s", self.MAX_ATTEMPTS)
         return QuizOutcome(attempt, last_correct, total_questions, False)
 
     async def _ensure_quiz_started(self) -> None:
-        button = self.page.locator(EXECUTE_SELECTOR)
-        try:
-            if await button.count():
-                await button.first.click()
-                await asyncio.sleep(self._adjusted_delay(2.0))
-        except PlaywrightError as exc:
-            self.logger.debug("Quiz: impossibile cliccare 'Esegui': %s", exc)
+        await self._trigger_quiz_interface()
         await self._expand_collapsible_sections()
         try:
             await self.page.wait_for_selector(QUIZ_CONTAINER_SELECTOR, timeout=8000)
@@ -239,30 +274,34 @@ class QuizSolver:
         if force:
             await self.page.wait_for_timeout(200)
 
-    async def _answer_questions(self, total_questions: int) -> None:
+    async def _answer_questions(self, total_questions: int, *, reuse_correct: bool) -> None:
         for index in range(total_questions):
             if self.stop_event.is_set():
                 return
             if self.watchdog:
                 self.watchdog.ping(f"quiz domanda {index + 1}")
             question = self.page.locator(QUIZ_CONTAINER_SELECTOR).nth(index)
-            if index in self.correct_answers:
+            if reuse_correct and index in self.correct_questions and index in self.correct_answers:
                 await self._select_option_by_index(question, self.correct_answers[index])
                 await self._human_pause(0.35)
                 continue
             await self._select_random_option(question, index)
             await self._human_pause(0.35)
 
-        await self._ensure_all_answered(total_questions)
+        await self._ensure_all_answered(total_questions, reuse_correct=reuse_correct)
         await self._human_review(total_questions)
 
-    async def _ensure_all_answered(self, total_questions: int) -> None:
+    async def _ensure_all_answered(self, total_questions: int, *, reuse_correct: bool) -> None:
         questions = self.page.locator(QUIZ_CONTAINER_SELECTOR)
         for index in range(total_questions):
             if self.stop_event.is_set():
                 return
             question = questions.nth(index)
             if await self._has_selection(question):
+                continue
+            if reuse_correct and index in self.correct_questions and index in self.correct_answers:
+                await self._select_option_by_index(question, self.correct_answers[index])
+                await self._human_pause(0.25)
                 continue
             await self._select_random_option(question, index)
             await self._human_pause(0.25)
@@ -303,6 +342,13 @@ class QuizSolver:
         wrong_choices = self.wrong_answers.get(question_index, set())
         for opt_index in range(count):
             if opt_index in wrong_choices:
+                continue
+            try:
+                classes = await options.nth(opt_index).get_attribute("class")
+            except PlaywrightError:
+                continue
+            tokens = set((classes or "").split())
+            if SELECTED_CLASS in tokens or WRONG_CLASS in tokens:
                 continue
             candidates.append(opt_index)
         if not candidates:
@@ -352,6 +398,7 @@ class QuizSolver:
                 return _AttemptState.ALREADY_COMPLETED
         except PlaywrightError:
             pass
+        await self._trigger_quiz_interface()
         await self._expand_collapsible_sections(force=True)
         try:
             if await submit_button.count():
@@ -369,7 +416,7 @@ class QuizSolver:
     async def _recover_missing_submit(self, total_questions: int) -> tuple[bool, bool]:
         if self.stop_event.is_set():
             return False, False
-        await self._ensure_all_answered(total_questions)
+        await self._ensure_all_answered(total_questions, reuse_correct=self._reuse_correct_answers)
         await self._expand_collapsible_sections(force=True)
         submit_button = self.page.locator(SUBMIT_SELECTOR)
         try:
@@ -413,9 +460,12 @@ class QuizSolver:
                     continue
                 if WRONG_CLASS in tokens:
                     self.wrong_answers.setdefault(index, set()).add(opt_index)
+                    self.correct_answers.pop(index, None)
+                    self.correct_questions.discard(index)
                 else:
                     correct_count += 1
                     self.correct_answers[index] = opt_index
+                    self.correct_questions.add(index)
         return correct_count
 
     async def _retry_quiz(self) -> bool:
@@ -516,6 +566,43 @@ class QuizSolver:
                 if WRONG_CLASS in tokens:
                     return True
         return False
+
+    async def _trigger_quiz_interface(self) -> None:
+        if self.stop_event.is_set():
+            return
+        selectors = (EXECUTE_SELECTOR,) + ALTERNATE_EXECUTE_SELECTORS
+        for selector in selectors:
+            try:
+                button = self.page.locator(selector)
+            except PlaywrightError as exc:
+                self.logger.debug(
+                    "Quiz: selettore iniziale %s non valido: %s",
+                    selector,
+                    exc,
+                )
+                continue
+            try:
+                if not await button.count():
+                    continue
+            except PlaywrightError as exc:
+                self.logger.debug(
+                    "Quiz: impossibile contare elementi %s: %s",
+                    selector,
+                    exc,
+                )
+                continue
+            if await self._safe_click(button.first, f"apertura quiz tramite {selector}"):
+                await self._human_pause(1.8)
+                return
+
+    async def _reset_interface(self) -> None:
+        if self.stop_event.is_set():
+            return
+        try:
+            await self.page.keyboard.press("Escape")
+        except PlaywrightError:
+            pass
+        await self._trigger_quiz_interface()
 
     async def _safe_click(self, target: Locator, description: str) -> bool:
         for attempt in range(3):
