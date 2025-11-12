@@ -7,7 +7,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Awaitable, Callable, Iterable, Optional
 
 from playwright.async_api import (
     Error as PlaywrightError,
@@ -40,6 +40,26 @@ CHAPTER_HEADER_SELECTOR = (
 VIDEO_BLOCK_HEADER_TEXT = "Riproduzione del video non consentita"
 VIDEO_BLOCK_HEADER_SELECTOR = "h3.text-2xl.font-medium.mt-4.whitespace-pre-line"
 VIDEO_BLOCK_CONFIRM_SELECTOR = "button.bg-platform-primary.text-white"
+
+OVERLAY_CANDIDATE_SELECTORS: tuple[str, ...] = (
+    "div.fixed.inset-0",
+    "div.fixed.top-0.left-0.right-0.bottom-0",
+    "div.fixed[class*='z-']",
+    "div[class*='bg-black\\/20'][class*='fixed']",
+    "div[class*='overlay'][class*='fixed']",
+    "div[class*='modal'][class*='fixed']",
+)
+
+OVERLAY_BUTTON_LABELS: tuple[str, ...] = (
+    "Chiudi",
+    "Chiudi X",
+    "Close",
+    "Ok",
+    "OK",
+    "Continua",
+    "Ho capito",
+    "Comprendo",
+)
 
 
 def _selector(config: RuntimeConfig, key: str, default: str) -> str:
@@ -207,6 +227,7 @@ class VerificationResult:
     total_lessons: int
     completed_lessons: int
     incomplete_lessons: list[IncompleteLesson]
+    open_failures: int = 0
 
     @property
     def missing_count(self) -> int:
@@ -228,6 +249,13 @@ class WatchdogExpired(RuntimeError):
     def __init__(self, message: str, *, elapsed: Optional[float] = None) -> None:
         super().__init__(message)
         self.elapsed = elapsed
+
+
+class CourseContextBlocked(RuntimeError):
+    """Raised when the course UI becomes unresponsive or blocked by overlays."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 class ActivityWatchdog:
@@ -388,6 +416,213 @@ async def dismiss_video_restriction_popup(page: Page, config: RuntimeConfig, log
             "Errore nel rilevamento del bottone del popup di blocco video: %s", exc
         )
     return False
+
+
+async def _detect_blocking_overlays(page: Page) -> list[Locator]:
+    overlays: list[Locator] = []
+    for selector in OVERLAY_CANDIDATE_SELECTORS:
+        try:
+            candidate = page.locator(selector)
+        except PlaywrightError:
+            continue
+        try:
+            count = await candidate.count()
+        except PlaywrightError:
+            continue
+        if count:
+            overlays.append(candidate.first)
+    return overlays
+
+
+async def _dismiss_blocking_overlay(page: Page, logger, *, context: str) -> bool:
+    overlays = await _detect_blocking_overlays(page)
+    if not overlays:
+        return False
+    logger.warning(
+        "Overlay bloccante rilevato durante %s: tentativo di chiusura", context
+    )
+
+    async def _overlay_active() -> bool:
+        detected = await _detect_blocking_overlays(page)
+        return bool(detected)
+
+    for overlay in overlays:
+        for label in OVERLAY_BUTTON_LABELS:
+            try:
+                button = overlay.locator(f"button:has-text('{label}')").first
+                if await button.count():
+                    try:
+                        await button.click(timeout=1500)
+                        await page.wait_for_timeout(300)
+                        if not await _overlay_active():
+                            logger.info(
+                                "Overlay chiuso cliccando il bottone '%s'", label
+                            )
+                            return True
+                    except PlaywrightError:
+                        continue
+            except PlaywrightError:
+                continue
+        try:
+            role_buttons = overlay.locator("[role='button']")
+            count = await role_buttons.count()
+        except PlaywrightError:
+            count = 0
+        for idx in range(count):
+            try:
+                await role_buttons.nth(idx).click(timeout=1500)
+                await page.wait_for_timeout(300)
+                if not await _overlay_active():
+                    logger.info(
+                        "Overlay chiuso tramite elemento role=button durante %s",
+                        context,
+                    )
+                    return True
+            except PlaywrightError:
+                continue
+
+    try:
+        await page.keyboard.press("Escape")
+        await page.wait_for_timeout(200)
+        if not await _overlay_active():
+            logger.info("Overlay chiuso premendo ESC")
+            return True
+    except PlaywrightError:
+        pass
+
+    for overlay in await _detect_blocking_overlays(page):
+        try:
+            box = await overlay.bounding_box()
+        except PlaywrightError:
+            box = None
+        if not box:
+            continue
+        try:
+            await page.mouse.click(box["x"] + 5, box["y"] + 5)
+            await page.wait_for_timeout(200)
+        except PlaywrightError:
+            continue
+        if not await _overlay_active():
+            logger.info("Overlay chiuso cliccando sullo sfondo")
+            return True
+
+    logger.warning("Overlay bloccante persistente durante %s", context)
+    return False
+
+
+async def _soft_reload_course_page(
+    page: Page,
+    config: RuntimeConfig,
+    logger,
+    *,
+    stop_event: asyncio.Event,
+    watchdog: Optional["ActivityWatchdog"] = None,
+) -> bool:
+    if stop_event.is_set():
+        return False
+    logger.info("Recupero corso: reload pagina in corso")
+    try:
+        await page.reload(
+            wait_until="domcontentloaded",
+            timeout=int(config.navigation_timeout * 1000),
+        )
+    except PlaywrightError as exc:
+        logger.error("Reload pagina fallito: %s", exc)
+        return False
+    if stop_event.is_set():
+        return False
+    try:
+        await page.wait_for_timeout(int(config.lesson_render_wait * 1000))
+    except PlaywrightError:
+        pass
+    if watchdog:
+        watchdog.ping("reload corso")
+    await ensure_cookies(page, logger)
+    try:
+        await _dismiss_blocking_overlay(page, logger, context="reload corso")
+    except PlaywrightError:
+        pass
+    return True
+
+
+async def _navigate_to_course_root(
+    page: Page,
+    config: RuntimeConfig,
+    logger,
+    *,
+    stop_event: asyncio.Event,
+    watchdog: Optional["ActivityWatchdog"] = None,
+) -> bool:
+    if stop_event.is_set():
+        return False
+    logger.info("Recupero corso: riapertura pagina principale")
+    try:
+        await page.goto(
+            config.url,
+            wait_until="domcontentloaded",
+            timeout=int(config.navigation_timeout * 1000),
+        )
+    except PlaywrightError as exc:
+        logger.error("Riapertura pagina principale fallita: %s", exc)
+        return False
+    if stop_event.is_set():
+        return False
+    try:
+        await page.wait_for_timeout(int(config.login_wait * 1000))
+    except PlaywrightError:
+        pass
+    if watchdog:
+        watchdog.ping("riapertura corso")
+    await ensure_cookies(page, logger)
+    try:
+        await _dismiss_blocking_overlay(page, logger, context="riapertura corso")
+    except PlaywrightError:
+        pass
+    return True
+
+
+async def _apply_course_recovery(
+    page: Page,
+    config: RuntimeConfig,
+    logger,
+    *,
+    reason: str,
+    start_step: int,
+    stop_event: asyncio.Event,
+    watchdog: Optional["ActivityWatchdog"] = None,
+) -> tuple[bool, int]:
+    steps: tuple[tuple[str, Callable[..., Awaitable[bool]]], ...] = (
+        ("reload morbido", _soft_reload_course_page),
+        ("riapertura corso", _navigate_to_course_root),
+    )
+    total = len(steps)
+    step_index = max(0, start_step)
+    while step_index < total and not stop_event.is_set():
+        label, action = steps[step_index]
+        logger.warning(
+            "Recupero corso step %s/%s (%s) dopo blocco: %s",
+            step_index + 1,
+            total,
+            label,
+            reason,
+        )
+        try:
+            recovered = await action(
+                page,
+                config,
+                logger,
+                stop_event=stop_event,
+                watchdog=watchdog,
+            )
+        except PlaywrightError as exc:
+            logger.error("Recupero step '%s' fallito per errore Playwright: %s", label, exc)
+            recovered = False
+        if recovered:
+            logger.info("Recupero corso step %s completato (%s)", step_index + 1, label)
+            return True, step_index + 1
+        logger.error("Recupero corso step %s fallito (%s)", step_index + 1, label)
+        step_index += 1
+    return False, step_index
 
 
 async def collect_chapter_bounds(page: Page, logger, config: RuntimeConfig) -> list[ChapterBounds]:
@@ -867,6 +1102,7 @@ async def click_with_retry(
     page: Optional[Page] = None,
 ) -> bool:
     timeout_ms = int(config.click_timeout * 1000)
+    overlay_detected = False
     for attempt in range(1, config.max_retries + 1):
         try:
             await locator.wait_for(state="attached", timeout=timeout_ms)
@@ -891,6 +1127,21 @@ async def click_with_retry(
                 exc,
                 delay,
             )
+            if page is not None and "intercepts pointer events" in str(exc).lower():
+                try:
+                    closed = await _dismiss_blocking_overlay(
+                        page, logger, context=f"click {description}"
+                    )
+                except PlaywrightError:
+                    closed = False
+                if closed:
+                    logger.info(
+                        "Overlay gestito dopo il fallimento del click %s: nuovo tentativo",
+                        description,
+                    )
+                    await asyncio.sleep(0.2)
+                    continue
+                overlay_detected = True
             if page is not None:
                 try:
                     await page.wait_for_timeout(150)
@@ -904,6 +1155,10 @@ async def click_with_retry(
                         pass
             if attempt < config.max_retries:
                 await asyncio.sleep(delay)
+    if overlay_detected:
+        raise CourseContextBlocked(
+            f"Click {description} bloccato da overlay persistente"
+        )
     return False
 
 
@@ -1129,6 +1384,8 @@ async def _run_course_once(
         watchdog.ping("raccolta capitoli")
 
     start_index = 0
+    blocking_failures = 0
+    course_progress = False
     if config.start_chapter is not None:
         matched = _find_start_chapter_index(chapters, config.start_chapter, logger)
         if matched is not None:
@@ -1199,13 +1456,19 @@ async def _run_course_once(
                         await asyncio.sleep(0.3)
                     except PlaywrightError:
                         pass
-            if not await click_with_retry(
-                bounds.click_target,
-                config,
-                logger,
-                description=click_desc,
-                page=page,
-            ):
+            try:
+                click_ok = await click_with_retry(
+                    bounds.click_target,
+                    config,
+                    logger,
+                    description=click_desc,
+                    page=page,
+                )
+            except CourseContextBlocked:
+                blocking_failures += 1
+                raise
+            if not click_ok:
+                blocking_failures += 1
                 fallback_title = bounds.title.split("-", 1)[-1].strip() or bounds.title.strip()
                 if fallback_title and page is not None:
                     logger.info(
@@ -1217,18 +1480,24 @@ async def _run_course_once(
                         f"text=/{re.escape(fallback_title)}/i"
                     ).first
                     if await text_locator.count():
-                        if await click_with_retry(
-                            text_locator,
-                            config,
-                            logger,
-                            description=f"{click_desc} fallback",
-                            page=page,
-                        ):
+                        try:
+                            fallback_ok = await click_with_retry(
+                                text_locator,
+                                config,
+                                logger,
+                                description=f"{click_desc} fallback",
+                                page=page,
+                            )
+                        except CourseContextBlocked:
+                            blocking_failures += 1
+                            raise
+                        if fallback_ok:
                             logger.info(
                                 "Click fallback capitolo %s riuscito",
                                 chapter_label,
                             )
                         else:
+                            blocking_failures += 1
                             logger.error(
                                 "Impossibile aprire capitolo %s anche con fallback testo",
                                 chapter_label,
@@ -1378,13 +1647,19 @@ async def _run_course_once(
                         lesson.duration_seconds,
                         lesson.progress,
                     )
-                    if not await click_with_retry(
-                        lesson.locator,
-                        config,
-                        logger,
-                        description="lezione",
-                        page=page,
-                    ):
+                    try:
+                        lesson_click = await click_with_retry(
+                            lesson.locator,
+                            config,
+                            logger,
+                            description="lezione",
+                            page=page,
+                        )
+                    except CourseContextBlocked:
+                        blocking_failures += 1
+                        raise
+                    if not lesson_click:
+                        blocking_failures += 1
                         logger.error("Impossibile click lezione '%s'", lesson.title)
                         continue
                     try:
@@ -1407,6 +1682,7 @@ async def _run_course_once(
                         logger.info("Lezione completata '%s'", lesson.title)
                         attempts.pop(lesson.title, None)
                         progress_made = True
+                        course_progress = True
                     else:
                         count = attempts.get(lesson.title, 0) + 1
                         attempts[lesson.title] = count
@@ -1419,6 +1695,7 @@ async def _run_course_once(
                             )
                             rescan_requested = True
                             progress_made = True
+                            course_progress = True
                             break
                         logger.error(
                             "Lezione '%s' fallita dopo %s tentativi: passo oltre",
@@ -1426,6 +1703,7 @@ async def _run_course_once(
                             count,
                         )
                         progress_made = True
+                        course_progress = True
 
                 if stop_event.is_set():
                     return False
@@ -1445,6 +1723,10 @@ async def _run_course_once(
         _reset_state(state, config)
     if stop_event.is_set():
         return False
+    if blocking_failures and not course_progress:
+        raise CourseContextBlocked(
+            "Nessuna lezione riprodotta a causa di errori di click persistenti"
+        )
     return True
 
 
@@ -1492,6 +1774,7 @@ async def _verify_course_completion(
     incomplete: list[IncompleteLesson] = []
     total_lessons = 0
     completed = 0
+    open_failures = 0
     for bounds in chapters:
         chapter_label = _chapter_log_label(bounds)
         if watchdog:
@@ -1516,13 +1799,19 @@ async def _verify_course_completion(
             await asyncio.sleep(0.5)
         except PlaywrightError:
             pass
-        if not await click_with_retry(
-            bounds.click_target,
-            config,
-            logger,
-            description=click_desc,
-            page=page,
-        ):
+        try:
+            click_ok = await click_with_retry(
+                bounds.click_target,
+                config,
+                logger,
+                description=click_desc,
+                page=page,
+            )
+        except CourseContextBlocked:
+            open_failures += 1
+            raise
+        if not click_ok:
+            open_failures += 1
             logger.warning(
                 "Verifica finale: impossibile aprire il capitolo %s",
                 chapter_label,
@@ -1564,6 +1853,7 @@ async def _verify_course_completion(
         total_lessons=total_lessons,
         completed_lessons=completed,
         incomplete_lessons=incomplete,
+        open_failures=open_failures,
     )
 
 
@@ -1575,58 +1865,92 @@ async def run_course(page: Page, config: RuntimeConfig, logger, stop_event: asyn
         logger=logger,
     )
     watchdog.start(stop_event)
+    recovery_step = 0
     try:
         while not stop_event.is_set():
-            watchdog.raise_if_expired()
-            watchdog.ping("passata principale")
-            logger.info("Avvio passata corso con start_chapter=%s", effective_config.start_chapter)
-            completed = await _run_course_once(
-                page, effective_config, logger, stop_event, state, watchdog=watchdog
-            )
-            if not completed:
-                return
-            if stop_event.is_set():
-                return
-            watchdog.ping("verifica finale")
-            logger.info("Passata principale completata, avvio verifica finale")
-            verification = await _verify_course_completion(
-                page, effective_config, logger, stop_event, watchdog=watchdog
-            )
-            if stop_event.is_set():
-                return
-            watchdog.raise_if_expired()
-            missing = verification.incomplete_lessons
-            logger.info(
-                "Lezioni totali trovate: %s | Completate: %s | Mancanti: %s",
-                verification.total_lessons,
-                verification.completed_lessons,
-                verification.total_lessons - verification.completed_lessons,
-            )
-            if not missing:
+            try:
+                watchdog.raise_if_expired()
+                watchdog.ping("passata principale")
                 logger.info(
-                    "Verifica completata: tutte le lezioni sono state svolte (%s capitoli, %s lezioni totali).",
-                    verification.total_chapters,
-                    verification.total_lessons,
+                    "Avvio passata corso con start_chapter=%s",
+                    effective_config.start_chapter,
                 )
-                return
-            lowest = verification.lowest_incomplete
-            if lowest is None:
-                return
-            logger.warning(
-                "Verifica completata: lezioni mancanti rilevate (%s capitoli incompleti, %s lezioni da completare). Riavvio dal capitolo più basso con lezione mancante.",
-                len({item.chapter_index for item in missing}),
-                verification.missing_count,
-            )
-            logger.info(
-                "Riavvio dal capitolo %s ('%s') per riprendere dalla lezione '%s' (%s%%)",
-                lowest.chapter_index,
-                lowest.chapter_title,
-                lowest.lesson_title,
-                lowest.progress,
-            )
-            effective_config = effective_config.with_overrides(
-                start_chapter=lowest.chapter_index
-            )
+                completed = await _run_course_once(
+                    page, effective_config, logger, stop_event, state, watchdog=watchdog
+                )
+                if not completed:
+                    return
+                if stop_event.is_set():
+                    return
+                watchdog.ping("verifica finale")
+                logger.info("Passata principale completata, avvio verifica finale")
+                verification = await _verify_course_completion(
+                    page, effective_config, logger, stop_event, watchdog=watchdog
+                )
+                if stop_event.is_set():
+                    return
+                watchdog.raise_if_expired()
+                missing = verification.incomplete_lessons
+                logger.info(
+                    "Lezioni totali trovate: %s | Completate: %s | Mancanti: %s",
+                    verification.total_lessons,
+                    verification.completed_lessons,
+                    verification.total_lessons - verification.completed_lessons,
+                )
+                if verification.open_failures:
+                    raise CourseContextBlocked(
+                        "Verifica finale bloccata: capitoli non cliccabili"
+                    )
+                if (
+                    verification.total_chapters > 0
+                    and verification.total_lessons == 0
+                    and verification.completed_lessons == 0
+                ):
+                    raise CourseContextBlocked(
+                        "Verifica finale senza lezioni rilevate: probabile desincronizzazione"
+                    )
+                if not missing:
+                    logger.info(
+                        "Verifica completata: tutte le lezioni sono state svolte (%s capitoli, %s lezioni totali).",
+                        verification.total_chapters,
+                        verification.total_lessons,
+                    )
+                    return
+                lowest = verification.lowest_incomplete
+                if lowest is None:
+                    return
+                logger.warning(
+                    "Verifica completata: lezioni mancanti rilevate (%s capitoli incompleti, %s lezioni da completare). Riavvio dal capitolo più basso con lezione mancante.",
+                    len({item.chapter_index for item in missing}),
+                    verification.missing_count,
+                )
+                logger.info(
+                    "Riavvio dal capitolo %s ('%s') per riprendere dalla lezione '%s' (%s%%)",
+                    lowest.chapter_index,
+                    lowest.chapter_title,
+                    lowest.lesson_title,
+                    lowest.progress,
+                )
+                effective_config = effective_config.with_overrides(
+                    start_chapter=lowest.chapter_index
+                )
+                recovery_step = 0
+            except CourseContextBlocked as exc:
+                if stop_event.is_set():
+                    return
+                recovered, next_step = await _apply_course_recovery(
+                    page,
+                    effective_config,
+                    logger,
+                    reason=str(exc),
+                    start_step=recovery_step,
+                    stop_event=stop_event,
+                    watchdog=watchdog,
+                )
+                recovery_step = next_step
+                if recovered:
+                    continue
+                raise
         logger.info("Stop richiesto durante il loop principale del corso")
     finally:
         await watchdog.stop()

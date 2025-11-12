@@ -18,7 +18,7 @@ import threading
 
 from .config import RuntimeConfig
 from .logging_utils import configure_logging
-from .lessons import WatchdogExpired, run_course
+from .lessons import CourseContextBlocked, WatchdogExpired, run_course
 from .state import LessonState
 
 
@@ -192,7 +192,7 @@ class Runner:
                         page, self.config, self.logger, self.stop_event, self.state
                     )
                     return
-                except (PlaywrightError, WatchdogExpired) as exc:
+                except (PlaywrightError, WatchdogExpired, CourseContextBlocked) as exc:
                     if self.stop_event.is_set():
                         self.logger.info(
                             "Stop richiesto durante la gestione di un errore Playwright"
