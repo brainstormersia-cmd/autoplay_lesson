@@ -50,6 +50,9 @@ class LessonSelectors:
     percentage: str = (
         ":scope div.w-1\\/12.text-xs, :scope div.w-1\\/12.md\\:text-xs, :scope span.text-xs, :scope span.text-sm"
     )
+    mark_complete: str = "button[data-testid='mark-complete']"
+    next_item: str = "button[data-testid='next-item']"
+    next_item_secondary: str = "button.cds-button-secondary:has-text(\"Elemento successivo\")"
     progress_complete: str = (
         ":scope .bg-platform-green[style*='width: 100%'], "
         ":scope .bg-platform-primary[style*='width: 100%'], "
