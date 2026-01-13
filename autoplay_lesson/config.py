@@ -153,7 +153,7 @@ class RuntimeConfig:
             except KeyError:
                 kwargs["course_mode"] = CourseMode.COMPLETE
         if "url" not in kwargs:
-            kwargs["url"] = "https://esempio-corso"
+            kwargs["url"] = "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
         return cls(**kwargs)
 
     def chapter_in_scope(self, index: int, *, number: Optional[int] = None) -> bool:
@@ -170,7 +170,9 @@ class RuntimeConfig:
         return replace(self, **kwargs)
 
 
-DEFAULTS = RuntimeConfig(url="https://esempio-corso")
+DEFAULTS = RuntimeConfig(
+    url="https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
+)
 
 
 def _encode_password(password: str) -> str:
@@ -512,12 +514,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
 def ensure_url(config: RuntimeConfig, *, prompt: bool = True) -> RuntimeConfig:
     if config.url and not config.url.lower().startswith("http"):
         raise SystemExit("Specificare un URL valido (deve iniziare con http)")
+    if config.url != DEFAULTS.url:
+        return config.with_overrides(url=DEFAULTS.url)
     if config.url == DEFAULTS.url and prompt:
-        try:
-            entered = input("Inserisci l'URL del corso: ").strip()
-        except EOFError as exc:  # pragma: no cover - interattivo
-            raise SystemExit("URL non fornito") from exc
-        if not entered:
-            raise SystemExit("URL non fornito")
-        return config.with_overrides(url=entered)
+        return config
     return config

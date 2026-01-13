@@ -1241,6 +1241,9 @@ async def wait_for_lesson(
         if watchdog:
             watchdog.raise_if_expired()
             watchdog.ping(f"monitor {candidate.title}")
+        if await _maybe_click_navigation_buttons(page, config, logger):
+            logger.info("Navigazione completata tramite pulsanti player")
+            return True
         now = loop.time()
         if scroll_interval > 0 and now - last_scroll >= scroll_interval:
             try:
@@ -1285,6 +1288,9 @@ async def wait_for_lesson(
             await asyncio.sleep(config.lesson_render_wait)
             deadline = min(deadline + config.lesson_render_wait, absolute_deadline)
             continue
+        if await _maybe_click_navigation_buttons(page, config, logger):
+            logger.info("Navigazione completata tramite pulsanti player")
+            return True
         current_progress = await _extract_percentage(candidate.locator, config)
         if current_progress is None:
             logger.debug(
@@ -1330,6 +1336,37 @@ async def wait_for_lesson(
         logger.info("Attesa interrotta per richiesta di stop")
         return False
     return progress >= config.progress_threshold
+
+
+async def _maybe_click_navigation_buttons(page: Page, config: RuntimeConfig, logger) -> bool:
+    candidates = (
+        ("mark_complete", LS.mark_complete, "Contrassegna come completato"),
+        ("next_item", LS.next_item, "Vai alla voce successiva"),
+        ("next_item_secondary", LS.next_item_secondary, "Elemento successivo"),
+    )
+    timeout_ms = int(config.click_timeout * 1000)
+    for key, default, label in candidates:
+        selector = _selector(config, key, default)
+        try:
+            locator = page.locator(selector)
+            if not await locator.count():
+                continue
+            button = locator.first
+            try:
+                if not await button.is_visible():
+                    continue
+            except PlaywrightError:
+                pass
+            await button.click(timeout=timeout_ms)
+            logger.info("Click automatico su '%s' (selector=%s)", label, selector)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
+            except PlaywrightError:
+                await page.wait_for_timeout(300)
+            return True
+        except PlaywrightError:
+            continue
+    return False
 
 
 
