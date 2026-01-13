@@ -20,7 +20,7 @@ Automazione Playwright modulare per riprodurre in sequenza le lezioni di un cors
 
 ```bash
 python -m autoplay_lesson \
-  --url "https://lms.pegaso.multiversity.click/videolezioni/0501906IUS15/" \
+  --url "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage" \
   --after-play 20 \
   --buffer 5 \
   --start-chapter 3 \
