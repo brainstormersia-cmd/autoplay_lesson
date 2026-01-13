@@ -313,6 +313,18 @@ SUBMIT_SELECTORS: tuple[str, ...] = (
     "button[type='submit']",
     "button:has-text('Login')",
 )
+LOGIN_BUTTON_SELECTORS: tuple[str, ...] = (
+    "a[data-e2e='header-login-button']",
+    "a:has(span.cds-button-label:has-text(\"Accedi\"))",
+    "button:has-text(\"Accedi\")",
+    "a:has-text(\"Accedi\")",
+)
+GOOGLE_LOGIN_SELECTORS: tuple[str, ...] = (
+    "button:has-text(\"Continua con Google\")",
+    "button:has-text(\"Continue with Google\")",
+    "[data-e2e='google-oauth-button']",
+    "button:has(span.cds-button-label:has-text(\"Continua con Google\"))",
+)
 
 
 async def _find_login_form(page: Page) -> tuple[Locator | None, Locator | None, Locator | None]:
@@ -359,6 +371,38 @@ async def _find_login_form(page: Page) -> tuple[Locator | None, Locator | None, 
     return None, None, None
 
 
+async def _click_first_in_frames(
+    page: Page,
+    selectors: tuple[str, ...],
+    logger,
+    *,
+    label: str,
+    timeout_ms: int,
+) -> bool:
+    frames = [page.main_frame, *[frame for frame in page.frames if frame != page.main_frame]]
+    for frame in frames:
+        for selector in selectors:
+            try:
+                candidate = frame.locator(selector)
+            except PlaywrightError:
+                continue
+            try:
+                if not await candidate.count():
+                    continue
+                button = candidate.first
+                try:
+                    if not await button.is_visible():
+                        continue
+                except PlaywrightError:
+                    pass
+                await button.click(timeout=timeout_ms)
+                logger.info("Click '%s' tramite selettore %s", label, selector)
+                return True
+            except PlaywrightError:
+                continue
+    return False
+
+
 async def ensure_logged_in(page: Page, config: RuntimeConfig, logger) -> None:
     """Ensure the user is authenticated before proceeding."""
 
@@ -367,6 +411,36 @@ async def ensure_logged_in(page: Page, config: RuntimeConfig, logger) -> None:
     username_field: Locator | None = None
     password_field: Locator | None = None
     submit_button: Locator | None = None
+
+    timeout_ms = int(config.click_timeout * 1000)
+    if await _click_first_in_frames(
+        page,
+        LOGIN_BUTTON_SELECTORS,
+        logger,
+        label="Accedi",
+        timeout_ms=timeout_ms,
+    ):
+        try:
+            await page.wait_for_load_state(
+                "domcontentloaded", timeout=int(config.navigation_timeout * 1000)
+            )
+        except PlaywrightError:
+            await page.wait_for_timeout(500)
+
+    if await _click_first_in_frames(
+        page,
+        GOOGLE_LOGIN_SELECTORS,
+        logger,
+        label="Continua con Google",
+        timeout_ms=timeout_ms,
+    ):
+        try:
+            await page.wait_for_load_state(
+                "networkidle", timeout=int(config.navigation_timeout * 1000)
+            )
+        except PlaywrightError:
+            logger.debug("Timeout durante il login Google, proseguo")
+        return
 
     while loop.time() < deadline:
         username_field, password_field, submit_button = await _find_login_form(page)

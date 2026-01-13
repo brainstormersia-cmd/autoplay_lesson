@@ -69,6 +69,7 @@ class RuntimeConfig:
     selectors_json: Optional[Path] = None
     selector_overrides: dict[str, str] = field(default_factory=dict)
     use_gui: bool = False
+    cdp_url: Optional[str] = None
     login_wait: float = 8.0
     course_mode: CourseMode = CourseMode.COMPLETE
     detailed_log: bool = False
@@ -108,6 +109,7 @@ class RuntimeConfig:
             "Configurazione corrente:\n"
             f"  URL: {self.url}\n"
             f"  Profilo Chrome: {'attivo' if self.use_chrome_profile and self.user_data_dir else 'disattivato'}\n"
+            f"  CDP URL: {self.cdp_url or '-'}\n"
             f"  Username: {self.username or '-'}\n"
             f"  Headless: {self.headless}\n"
             f"  Slow motion: {self.slow_mo}ms\n"
@@ -153,7 +155,7 @@ class RuntimeConfig:
             except KeyError:
                 kwargs["course_mode"] = CourseMode.COMPLETE
         if "url" not in kwargs:
-            kwargs["url"] = "https://esempio-corso"
+            kwargs["url"] = "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
         return cls(**kwargs)
 
     def chapter_in_scope(self, index: int, *, number: Optional[int] = None) -> bool:
@@ -170,7 +172,9 @@ class RuntimeConfig:
         return replace(self, **kwargs)
 
 
-DEFAULTS = RuntimeConfig(url="https://esempio-corso")
+DEFAULTS = RuntimeConfig(
+    url="https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
+)
 
 
 def _encode_password(password: str) -> str:
@@ -379,6 +383,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
     parser.add_argument("--blacklist", action="append", default=None, help="Regex titoli da escludere")
     parser.add_argument("--state-file", type=Path, default=DEFAULTS.state_file, help="File stato ripresa")
     parser.add_argument("--selectors-json", type=Path, help="Override selettori in JSON")
+    parser.add_argument("--cdp-url", help="Connette a un browser Chrome esistente via CDP")
     parser.add_argument("--username", help="Username della piattaforma")
     parser.add_argument("--password", help="Password della piattaforma (sconsigliato su CLI)")
     parser.add_argument("--remember", dest="remember_me", action="store_true", help="Salva credenziali e preferenze", default=None)
@@ -504,6 +509,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
         selectors_json=args.selectors_json,
         selector_overrides=selectors,
         use_gui=args.gui,
+        cdp_url=args.cdp_url,
     )
 
     return config
@@ -512,12 +518,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
 def ensure_url(config: RuntimeConfig, *, prompt: bool = True) -> RuntimeConfig:
     if config.url and not config.url.lower().startswith("http"):
         raise SystemExit("Specificare un URL valido (deve iniziare con http)")
+    if config.url != DEFAULTS.url:
+        return config.with_overrides(url=DEFAULTS.url)
     if config.url == DEFAULTS.url and prompt:
-        try:
-            entered = input("Inserisci l'URL del corso: ").strip()
-        except EOFError as exc:  # pragma: no cover - interattivo
-            raise SystemExit("URL non fornito") from exc
-        if not entered:
-            raise SystemExit("URL non fornito")
-        return config.with_overrides(url=entered)
+        return config
     return config
