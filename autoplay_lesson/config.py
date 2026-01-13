@@ -51,8 +51,8 @@ class RuntimeConfig:
     username: Optional[str] = None
     password: Optional[str] = None
     remember_me: bool = True
-    after_play: int = 20
-    buffer: int = 4
+    after_play: int = 15
+    buffer: int = 3
     max_wait: int = 3600
     stall_timeout: float = 120.0
     max_lesson_attempts: int = 2

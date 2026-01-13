@@ -1084,6 +1084,72 @@ async def _prime_chapter_content(
         pass
 
 
+async def _locate_lesson_by_title(
+    bounds: ChapterBounds, config: RuntimeConfig, title: str
+) -> Optional[Locator]:
+    rows = bounds.container.locator(_selector(config, "lesson_row", LS.lesson_row))
+    try:
+        locator = rows.filter(has_text=title).first
+        if await locator.count():
+            return locator
+    except PlaywrightError:
+        return None
+    return None
+
+
+async def _retry_open_lesson(
+    page: Page,
+    bounds: ChapterBounds,
+    lesson: LessonCandidate,
+    config: RuntimeConfig,
+    logger,
+    *,
+    stop_event: asyncio.Event,
+) -> tuple[bool, ChapterBounds]:
+    for attempt in range(1, 4):
+        if stop_event.is_set():
+            break
+        logger.warning(
+            "Recupero click lezione '%s' tentativo %s/3",
+            lesson.title,
+            attempt,
+        )
+        if not await _chapter_is_expanded(bounds):
+            logger.info("Capitolo chiuso, provo a riaprirlo prima del retry")
+            try:
+                await click_with_retry(
+                    bounds.click_target,
+                    config,
+                    logger,
+                    description="riapertura capitolo",
+                    page=page,
+                )
+            except CourseContextBlocked:
+                raise
+            await asyncio.sleep(config.lesson_render_wait)
+        await _prime_chapter_content(page, bounds, logger, config)
+        bounds = await _refresh_chapter_bounds(page, bounds, logger)
+        locator = await _locate_lesson_by_title(bounds, config, lesson.title)
+        if locator is None:
+            logger.warning(
+                "Lezione '%s' non trovata dopo il refresh del capitolo",
+                lesson.title,
+            )
+            continue
+        try:
+            if await click_with_retry(
+                locator,
+                config,
+                logger,
+                description="lezione retry",
+                page=page,
+            ):
+                return True, bounds
+        except CourseContextBlocked:
+            raise
+    return False, bounds
+
+
 async def _refresh_chapter_bounds(
     page: Page, bounds: ChapterBounds, logger, *, padding: float = 300.0
 ) -> ChapterBounds:
@@ -1917,7 +1983,34 @@ async def _run_course_once(
                     if not lesson_click:
                         blocking_failures += 1
                         logger.error("Impossibile click lezione '%s'", lesson.title)
-                        continue
+                        retry_ok, bounds = await _retry_open_lesson(
+                            page,
+                            bounds,
+                            lesson,
+                            config,
+                            logger,
+                            stop_event=stop_event,
+                        )
+                        if retry_ok:
+                            logger.info(
+                                "Click lezione '%s' riuscito dopo recupero",
+                                lesson.title,
+                            )
+                            lesson_click = True
+                        else:
+                            logger.error(
+                                "Click lezione '%s' fallito dopo recupero: provo un reload",
+                                lesson.title,
+                            )
+                            await _soft_reload_course_page(
+                                page,
+                                config,
+                                logger,
+                                stop_event=stop_event,
+                                watchdog=watchdog,
+                            )
+                        if not lesson_click:
+                            continue
                     try:
                         await _human_like_scroll(
                             page,
