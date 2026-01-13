@@ -4,6 +4,7 @@ const COURSE_URL =
   process.env.COURSE_URL ||
   'https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage';
 const SPEED_MULTIPLIER = 2;
+const SAFETY_BUFFER_MS = 8000;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -11,7 +12,7 @@ const parseMinutes = (text) => {
   if (!text) {
     return null;
   }
-  const match = text.match(/Duration:\s*(\d+)\s*minute/i);
+  const match = text.match(/(\d+)\s*minute/i);
   if (!match) {
     return null;
   }
@@ -40,7 +41,17 @@ const getVideoItems = async (page) => {
       continue;
     }
 
-    if (typeLabel !== 'Video') {
+    if (!typeLabel.includes('Video')) {
+      continue;
+    }
+
+    const isCompleted = await item.$('svg[data-testid="learn-item-success-icon"]');
+    if (isCompleted) {
+      continue;
+    }
+
+    const hasUnpresented = await item.$('rect');
+    if (!hasUnpresented) {
       continue;
     }
 
@@ -55,7 +66,7 @@ const getVideoItems = async (page) => {
     }
 
     const durationMinutes = parseMinutes(durationText);
-    const link = await item.$('a');
+    const link = await item.$('a.css-1oaf');
 
     if (!link) {
       continue;
@@ -90,10 +101,10 @@ const run = async () => {
       continue;
     }
 
-    const waitSeconds = (durationMinutes * 60) / SPEED_MULTIPLIER;
+    const waitMs = (durationMinutes * 60 * 1000) / SPEED_MULTIPLIER + SAFETY_BUFFER_MS;
 
     await link.click();
-    await delay(waitSeconds * 1000);
+    await delay(waitMs);
 
     if (index < videos.length - 1) {
       await page.goBack({ waitUntil: 'networkidle2' });

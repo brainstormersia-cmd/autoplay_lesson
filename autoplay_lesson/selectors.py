@@ -50,6 +50,7 @@ class LessonSelectors:
     percentage: str = (
         ":scope div.w-1\\/12.text-xs, :scope div.w-1\\/12.md\\:text-xs, :scope span.text-xs, :scope span.text-sm"
     )
+    current_item: str = "li[data-current-item='true'] a, a.css-v7ntdn"
     mark_complete: str = "button[data-testid='mark-complete']"
     next_item: str = "button[data-testid='next-item']"
     next_item_secondary: str = "button.cds-button-secondary:has-text(\"Elemento successivo\")"

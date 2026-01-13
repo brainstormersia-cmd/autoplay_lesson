@@ -162,10 +162,11 @@ Di seguito trovi una raccolta aggiornata dei selettori più utili per il player 
 
 Per una sequenza semplice basata sulla lista laterale del corso (solo voci con tipo **Video**), puoi usare lo script pronto in `docs/puppeteer_video_sequence.js`. Questo script:
 
-- filtra gli `<li>` dove `div.css-1rhvk9j` è esattamente `Video`,
+- filtra gli `<li>` dove `div.css-1rhvk9j` contiene `Video`,
+- salta i video già completati (`svg[data-testid="learn-item-success-icon"]`) e procede solo se trova il `rect` che indica non completato,
 - legge la durata in minuti da `span.rc-A11yScreenReaderOnly`,
-- calcola l'attesa effettiva a velocità 2× (durata * 60 / 2),
-- clicca il video, attende e torna alla lista per il successivo.
+- calcola l'attesa effettiva a velocità 2× (durata * 60 * 1000 / 2) con un buffer di sicurezza di ~8s,
+- clicca il link `a.css-1oaf`, attende e torna alla lista per il successivo.
 
 Avvio rapido:
 

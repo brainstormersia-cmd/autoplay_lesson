@@ -1244,6 +1244,19 @@ async def _read_player_timing(page: Page) -> tuple[Optional[int], Optional[float
     return None, rate
 
 
+async def _read_current_lesson_title(page: Page, config: RuntimeConfig) -> Optional[str]:
+    selector = _selector(config, "current_item", LS.current_item)
+    try:
+        locator = page.locator(selector).first
+        if not await locator.count():
+            return None
+        raw_title = await locator.inner_text(timeout=750)
+    except PlaywrightError:
+        return None
+    title = _normalize_label(raw_title)
+    return title or None
+
+
 async def wait_for_lesson(
     candidate: LessonCandidate,
     config: RuntimeConfig,
@@ -1256,28 +1269,35 @@ async def wait_for_lesson(
         return await _solve_quiz(candidate, config, logger, stop_event, page, watchdog)
 
     base = config.after_play
-    player_duration, playback_rate = await _read_player_timing(page)
-    raw_duration = candidate.duration_seconds or player_duration or 0
-    effective_rate = playback_rate if playback_rate and playback_rate > 0 else 1.0
-    effective_duration = int(round(raw_duration / effective_rate)) if raw_duration else 0
-    if effective_duration and effective_rate != 1.0:
+    active_title = candidate.title
+
+    async def _recalculate_timing(reason: str) -> tuple[float, int]:
+        player_duration, playback_rate = await _read_player_timing(page)
+        raw_duration = candidate.duration_seconds or player_duration or 0
+        effective_rate = playback_rate if playback_rate and playback_rate > 0 else 1.0
+        effective_duration = int(round(raw_duration / effective_rate)) if raw_duration else 0
+        if effective_duration and effective_rate != 1.0:
+            logger.info(
+                "Durata player rilevata: %ss con velocità %.2fx (attesa=%ss)",
+                raw_duration,
+                effective_rate,
+                effective_duration,
+            )
+        residual = max(0, effective_duration - base)
+        planned_total = base + residual + config.buffer
+        planned_total = min(planned_total, config.max_wait)
         logger.info(
-            "Durata player rilevata: %ss con velocità %.2fx (attesa=%ss)",
-            raw_duration,
-            effective_rate,
-            effective_duration,
+            "Attesa lezione '%s': base=%ss residuo=%ss buffer=%ss (tot=%ss) motivo=%s",
+            active_title,
+            base,
+            residual,
+            config.buffer,
+            planned_total,
+            reason,
         )
-    residual = max(0, effective_duration - base)
-    planned_total = base + residual + config.buffer
-    planned_total = min(planned_total, config.max_wait)
-    logger.info(
-        "Attesa lezione '%s': base=%ss residuo=%ss buffer=%ss (tot=%ss)",
-        candidate.title,
-        base,
-        residual,
-        config.buffer,
-        planned_total,
-    )
+        return planned_total, effective_duration
+
+    planned_total, _ = await _recalculate_timing("inizio")
     loop = asyncio.get_running_loop()
     start_time = loop.time()
     absolute_deadline = start_time + config.max_wait
@@ -1311,9 +1331,29 @@ async def wait_for_lesson(
         if watchdog:
             watchdog.raise_if_expired()
             watchdog.ping(f"monitor {candidate.title}")
+        current_title = await _read_current_lesson_title(page, config)
+        if current_title and not _titles_equal(current_title, active_title):
+            logger.info(
+                "Cambio lezione rilevato: '%s' -> '%s', ricalcolo attesa",
+                active_title,
+                current_title,
+            )
+            active_title = current_title
+            planned_total, _ = await _recalculate_timing("cambio lezione")
+            now = loop.time()
+            start_time = now
+            absolute_deadline = now + config.max_wait
+            deadline = min(now + planned_total, absolute_deadline)
+            progress = 0
+            progress_observed = False
+            last_progress_change = now
+            continue
         if await _maybe_click_navigation_buttons(page, config, logger):
             logger.info("Navigazione completata tramite pulsanti player")
             return True
+        if await _dismiss_blocking_overlay(page, logger, context="attesa lezione"):
+            logger.info("Overlay gestito durante l'attesa, riprendo monitoraggio")
+            await asyncio.sleep(config.lesson_render_wait)
         now = loop.time()
         if scroll_interval > 0 and now - last_scroll >= scroll_interval:
             try:
@@ -1353,10 +1393,32 @@ async def wait_for_lesson(
             continue
         except asyncio.TimeoutError:
             pass
+        current_title = await _read_current_lesson_title(page, config)
+        if current_title and not _titles_equal(current_title, active_title):
+            logger.info(
+                "Cambio lezione rilevato durante il polling: '%s' -> '%s'",
+                active_title,
+                current_title,
+            )
+            active_title = current_title
+            planned_total, _ = await _recalculate_timing("cambio lezione")
+            now = loop.time()
+            start_time = now
+            absolute_deadline = now + config.max_wait
+            deadline = min(now + planned_total, absolute_deadline)
+            progress = 0
+            progress_observed = False
+            last_progress_change = now
+            continue
         if await dismiss_video_restriction_popup(page, config, logger):
             logger.info(
                 "Popup blocco video gestito durante l'attesa, proseguo dopo il render"
             )
+            await asyncio.sleep(config.lesson_render_wait)
+            deadline = min(deadline + config.lesson_render_wait, absolute_deadline)
+            continue
+        if await _dismiss_blocking_overlay(page, logger, context="attesa lezione"):
+            logger.info("Overlay gestito durante l'attesa, proseguo dopo il render")
             await asyncio.sleep(config.lesson_render_wait)
             deadline = min(deadline + config.lesson_render_wait, absolute_deadline)
             continue
