@@ -34,7 +34,14 @@ class LessonSelectors:
 
     title_exclusions: tuple[str, ...] = ("dispensa", "obiettivi")
     quiz_keywords: tuple[str, ...] = ("test di fine lezione",)
-    lesson_row: str = ":scope div.border-t.hover\\:bg-platform-hover-light"
+    lesson_row: str = (
+        ":scope div.border-t.hover\\:bg-platform-hover-light, "
+        ":scope a.css-1oaf, "
+        ":scope a.css-v7ntdn, "
+        ":scope a[class*='outline-single-item-content-wrapper'], "
+        ":scope li[data-current-item='true'], "
+        ":scope li[data-current-item='true'] a"
+    )
     title: str = (
         ":scope div.mb-2, :scope span.font-semibold, :scope .text-base .mb-2, "
         ":scope div.font-semibold, :scope h3, :scope h4"
@@ -44,10 +51,18 @@ class LessonSelectors:
         ":scope div.w-1\\/12.text-xs, :scope div.w-1\\/12.md\\:text-xs, :scope span.text-xs, :scope span.text-sm"
     )
     progress_complete: str = (
-        ":scope .bg-platform-green[style*='width: 100%'], :scope .bg-platform-primary[style*='width: 100%']"
+        ":scope .bg-platform-green[style*='width: 100%'], "
+        ":scope .bg-platform-primary[style*='width: 100%'], "
+        ":scope svg[data-testid='learn-item-success-icon']"
     )
-    chapter_container: str = "div.bg-white.text-base.border.font-sans.font-semibold"
+    chapter_container: str = (
+        "div.bg-white.text-base.border.font-sans.font-semibold, "
+        "div:has(.cds-AccordionHeader-button)"
+    )
     chapter_header: str = (
+        "h3.css-k9b3du button.cds-AccordionHeader-button, "
+        ".cds-AccordionHeader-button, "
+        "div[data-testid='module-number-heading'], "
         "div.bg-white.text-base.border div.cursor-pointer, "
         "div.bg-white.text-base.border svg + div, "
         "div.bg-white.text-base.border:has(svg), "
