@@ -153,7 +153,7 @@ class RuntimeConfig:
             except KeyError:
                 kwargs["course_mode"] = CourseMode.COMPLETE
         if "url" not in kwargs:
-            kwargs["url"] = "https://esempio-corso"
+            kwargs["url"] = "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
         return cls(**kwargs)
 
     def chapter_in_scope(self, index: int, *, number: Optional[int] = None) -> bool:
@@ -170,7 +170,9 @@ class RuntimeConfig:
         return replace(self, **kwargs)
 
 
-DEFAULTS = RuntimeConfig(url="https://esempio-corso")
+DEFAULTS = RuntimeConfig(
+    url="https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
+)
 
 
 def _encode_password(password: str) -> str:

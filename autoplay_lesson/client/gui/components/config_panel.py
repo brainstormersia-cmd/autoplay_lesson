@@ -80,7 +80,7 @@ class ConfigPanel(ctk.CTkFrame):
         _Field(form, text="Link del corso", row=0, column=0, columnspan=2)
         url_entry = ctk.CTkEntry(
             form,
-            placeholder_text="https://lms.pegaso...",
+            placeholder_text="https://www.coursera.org/learn/...",
             textvariable=self.url_var,
             fg_color=styles.palette.background_primary,
             border_color=styles.palette.accent_primary,
