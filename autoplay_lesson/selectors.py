@@ -23,6 +23,8 @@ class OverlaySelectors:
         "Ok",
         "OK",
         "Continua",
+        "Continua a imparare",
+        "Vai alla voce successiva",
         "Ho capito",
         "Comprendo",
     )
@@ -39,14 +41,19 @@ class LessonSelectors:
         ":scope a.css-1oaf, "
         ":scope a.css-v7ntdn, "
         ":scope a[class*='outline-single-item-content-wrapper'], "
+        ":scope li, "
         ":scope li[data-current-item='true'], "
         ":scope li[data-current-item='true'] a"
     )
     title: str = (
+        ":scope .css-u7fh1q, :scope .css-1bdse57, "
         ":scope div.mb-2, :scope span.font-semibold, :scope .text-base .mb-2, "
         ":scope div.font-semibold, :scope h3, :scope h4"
     )
-    duration: str = ":scope div.text-sm.text-platform-gray, :scope span.text-sm, :scope span.text-xs"
+    duration: str = (
+        ":scope .css-74lbi7 span[aria-hidden='true'], "
+        ":scope div.text-sm.text-platform-gray, :scope span.text-sm, :scope span.text-xs"
+    )
     percentage: str = (
         ":scope div.w-1\\/12.text-xs, :scope div.w-1\\/12.md\\:text-xs, :scope span.text-xs, :scope span.text-sm"
     )
@@ -60,12 +67,15 @@ class LessonSelectors:
         ":scope svg[data-testid='learn-item-success-icon']"
     )
     chapter_container: str = (
+        ".cds-AccordionRoot-container, "
         "div.bg-white.text-base.border.font-sans.font-semibold, "
         "div:has(.cds-AccordionHeader-button)"
     )
     chapter_header: str = (
         "h3.css-k9b3du button.cds-AccordionHeader-button, "
         ".cds-AccordionHeader-button, "
+        ".css-6ecy9b, "
+        "button[aria-expanded], "
         "div[data-testid='module-number-heading'], "
         "div.bg-white.text-base.border div.cursor-pointer, "
         "div.bg-white.text-base.border svg + div, "

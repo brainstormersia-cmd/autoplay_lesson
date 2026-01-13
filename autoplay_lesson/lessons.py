@@ -62,6 +62,23 @@ def _is_quiz_title(title: str) -> bool:
     return any(keyword in lowered for keyword in LS.quiz_keywords)
 
 
+def _classify_lesson_href(href: str) -> str:
+    lowered = href.lower()
+    if "/lecture/" in lowered:
+        return "video"
+    if "/supplement/" in lowered:
+        return "reading"
+    if "/discussionprompt/" in lowered:
+        return "discussion"
+    if "/ungradedlti/" in lowered:
+        return "app"
+    if "/assignment-submission/" in lowered:
+        return "assignment"
+    if "/assignment/" in lowered:
+        return "quiz"
+    return "unknown"
+
+
 def _extract_chapter_number(title: str) -> Optional[int]:
     match = re.search(r"\b(\d{1,4})\b", title)
     if match:
@@ -876,6 +893,16 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
         # already scoped to the current chapter container, we no longer apply
         # coordinate-based filtering; we keep the bounding box only for
         # diagnostic purposes.
+        href = ""
+        content_type = "unknown"
+        try:
+            link_locator = row.locator("a[href]").first
+            if await link_locator.count():
+                href = await link_locator.get_attribute("href") or ""
+                if href:
+                    content_type = _classify_lesson_href(href)
+        except PlaywrightError:
+            href = ""
         try:
             title_locator = row.locator(
                 _selector(config, "lesson_title", LS.title)
@@ -894,9 +921,16 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
         if duration_label:
             duration_matches += 1
         progress = await _extract_percentage(row, config)
+        try:
+            if progress is None:
+                completed_icon = row.locator(LS.progress_complete)
+                if await completed_icon.count():
+                    progress = 100
+        except PlaywrightError:
+            pass
         if progress is not None:
             progress_matches += 1
-        is_quiz = _is_quiz_title(title_raw)
+        is_quiz = content_type == "quiz" or _is_quiz_title(title_raw)
         completion_hint = await _quiz_completion_hint(row, config) if is_quiz else False
         skip_reason = _title_skip_reason(
             title_raw,
@@ -905,6 +939,21 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
             is_quiz=is_quiz,
             completion_hint=completion_hint,
         )
+        if content_type != "video":
+            skip_reason = skip_reason or f"contenuto {content_type}"
+        if content_type == "assignment":
+            skip_reason = skip_reason or "compito valutato: intervento manuale"
+        if content_type == "unknown" and href:
+            skip_reason = skip_reason or "tipo contenuto non riconosciuto"
+        if href:
+            logger.debug(
+                "Riga lezione '%s': href=%s tipo=%s progress=%s skip=%s",
+                title_raw,
+                href,
+                content_type,
+                progress,
+                skip_reason,
+            )
         candidate = LessonCandidate(
             title=title_raw,
             title_raw=title_raw,
