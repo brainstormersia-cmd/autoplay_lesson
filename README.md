@@ -20,7 +20,7 @@ Automazione Playwright modulare per riprodurre in sequenza le lezioni di un cors
 
 ```bash
 python -m autoplay_lesson \
-  --url "https://lms.pegaso.multiversity.click/videolezioni/0501906IUS15/" \
+  --url "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage" \
   --after-play 20 \
   --buffer 5 \
   --start-chapter 3 \
@@ -39,6 +39,7 @@ Opzioni principali:
 - `--slow`: ritardo in millisecondi tra le azioni Playwright (utile per debugging visivo).
 - `--user-data-dir`: directory del profilo Chrome da riutilizzare (default: `~/.config/autoplay-lesson/chrome-profile`).
 - `--no-chrome-profile`: disattiva l'uso del profilo persistente.
+- `--cdp-url`: usa un Chrome già aperto (es. `http://localhost:9222`) per riutilizzare la sessione Google.
 - `--diagnose`: modalità diagnostica, non avvia la riproduzione ma stampa inventario completo di capitoli/lezioni.
 
 Il comando stampa subito il riepilogo della configurazione attiva e salva lo stato della riproduzione in `.state.json` per poter riprendere dall'ultima lezione completata.
@@ -152,6 +153,136 @@ Con `--diagnose` (o spunta "Diagnostica" dalla GUI) il bot apre il capitolo rich
 - Riepilogo finale di righe trovate, valide e scartate.
 
 Questa modalità è utile per tarare i selettori o verificare eventuali modifiche del layout.
+
+## Selettori aggiornati (player, timer e sidebar)
+
+Di seguito trovi una raccolta aggiornata dei selettori più utili per il player video, il timer e la sidebar (outline del corso). Usali come riferimento per personalizzazioni, override o script di automazione.
+
+## Script Puppeteer di esempio (filtra solo i video)
+
+Per una sequenza semplice basata sulla lista laterale del corso (solo voci con tipo **Video**), puoi usare lo script pronto in `docs/puppeteer_video_sequence.js`. Questo script:
+
+- filtra gli `<li>` dove `div.css-1rhvk9j` è esattamente `Video`,
+- legge la durata in minuti da `span.rc-A11yScreenReaderOnly`,
+- calcola l'attesa effettiva a velocità 2× (durata * 60 / 2),
+- clicca il video, attende e torna alla lista per il successivo.
+
+Avvio rapido:
+
+```bash
+node docs/puppeteer_video_sequence.js
+```
+
+Puoi cambiare URL con:
+
+```bash
+COURSE_URL="https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage" node docs/puppeteer_video_sequence.js
+```
+
+### Selettori principali per i pulsanti del player video
+
+```css
+/* "Contrassegna come completato" (Mark complete) */
+button[data-testid="mark-complete"],
+button:has(span.cds-button-label:text("Contrassegna come completato"))
+
+/* "Vai alla voce successiva" / "Next item" */
+button[data-testid="next-item"],
+button:has(span.cds-button-label:text("Vai alla voce successiva"))
+
+/* Pulsante generico "Elemento successivo" con icona freccia (spesso in basso a destra) */
+button.cds-button-endIcon svg [d*="M13.125 10.75"]   /* cerca path della freccia destra */
+button:has(.cds-button-endIcon)                     /* più generico */
+
+/* Pulsante PLAY principale */
+button[aria-label="Riproduci"],
+button[data-testid="playToggle"],
+button:has(svg[data-testid="PlayArrowSvg"])
+
+/* Pulsante Muto / Volume */
+button[aria-label="Muto"],
+button:has(svg[data-testid="VolumeUpSvg"])
+
+/* Pulsante Rewind 10 secondi */
+button[aria-label*="indietro di 10 secondi"],
+button:has(svg[data-testid="Replay10Svg"])
+
+/* Pulsante Forward 10 secondi */
+button[aria-label*="avanti di 10 secondi"],
+button:has(svg[data-testid="Forward10Svg"])
+```
+
+### Selettori per il timer / tempo video
+
+```css
+/* Tempo corrente */
+span.current-time-display
+
+/* Durata totale */
+span.duration-display
+
+/* Insieme (molto comune) */
+.current-time-display,
+.duration-display
+```
+
+### Selettori per la sidebar / outline del corso
+
+```css
+/* Tutti i moduli (accordion headers) */
+h3.css-k9b3du button.cds-AccordionHeader-button
+
+/* Titolo del modulo corrente (es: "Modulo 1", "Modulo 2") */
+div[data-testid="module-number-heading"]
+
+/* Link/item della lezione corrente (evidenziato) */
+a.css-v7ntdn                          /* classe specifica elemento selezionato */
+
+/* Tutti i link delle lezioni */
+a.css-1oaf                             /* la maggior parte delle voci */
+
+/* Icona "completato" ✓ */
+svg[data-testid="learn-item-success-icon"]
+
+/* Icona video (quando non completato) */
+svg rect[fill="var(--cds-color-grey-50)"]
+```
+
+### Selettori consigliati per uno script robusto (es. Tampermonkey / userscript)
+
+```javascript
+// Raccomandati per maggiore affidabilità (ordine di preferenza)
+
+const selectors = {
+  // Player controls
+  markComplete:    'button[data-testid="mark-complete"], button:has-text("Contrassegna come completato")',
+  nextItem:        'button[data-testid="next-item"], button:has-text("Vai alla voce successiva")',
+  nextBottom:      'button:has(.cds-button-endIcon svg):has-text("Elemento successivo")',
+  playButton:      'button[aria-label="Riproduci"], button[data-testid="playToggle"]',
+  muteButton:      'button[aria-label="Muto"]',
+  rewind10:        'button:has(svg[data-testid="Replay10Svg"])',
+  forward10:       'button:has(svg[data-testid="Forward10Svg"])',
+
+  // Timer
+  currentTime:     'span.current-time-display',
+  duration:        'span.duration-display',
+
+  // Outline / sidebar
+  currentLecture:  'a.css-v7ntdn',
+  allLectures:     'a.css-1oaf',
+  completedItems:  'svg[data-testid="learn-item-success-icon"]',
+  moduleTitles:    'div[data-testid="module-number-heading"]'
+};
+```
+
+### Raccomandazione pratica per automazione (es. "next video" automatico)
+
+```javascript
+// Prova in quest'ordine fino a quando non trovi l'elemento:
+document.querySelector('button[data-testid="next-item"]') ||
+document.querySelector('button:has-text("Vai alla voce successiva")') ||
+document.querySelector('button:has(.cds-button-endIcon):has-text(/successivo/i)')
+```
 
 ## Rilevamento lezioni
 
