@@ -39,6 +39,7 @@ Opzioni principali:
 - `--slow`: ritardo in millisecondi tra le azioni Playwright (utile per debugging visivo).
 - `--user-data-dir`: directory del profilo Chrome da riutilizzare (default: `~/.config/autoplay-lesson/chrome-profile`).
 - `--no-chrome-profile`: disattiva l'uso del profilo persistente.
+- `--cdp-url`: usa un Chrome già aperto (es. `http://localhost:9222`) per riutilizzare la sessione Google.
 - `--diagnose`: modalità diagnostica, non avvia la riproduzione ma stampa inventario completo di capitoli/lezioni.
 
 Il comando stampa subito il riepilogo della configurazione attiva e salva lo stato della riproduzione in `.state.json` per poter riprendere dall'ultima lezione completata.
