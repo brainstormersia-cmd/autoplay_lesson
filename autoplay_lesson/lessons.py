@@ -930,6 +930,22 @@ async def collect_lessons(page: Page, bounds: ChapterBounds, logger, config: Run
     return results
 
 
+async def _chapter_is_expanded(bounds: ChapterBounds) -> bool:
+    try:
+        return bool(
+            await bounds.click_target.evaluate(
+                "el => {\n"
+                "  if (!el) { return false; }\n"
+                "  const candidate = el.closest('[aria-expanded]') || el.querySelector('[aria-expanded]');\n"
+                "  if (!candidate) { return false; }\n"
+                "  return candidate.getAttribute('aria-expanded') === 'true';\n"
+                "}\n"
+            )
+        )
+    except PlaywrightError:
+        return False
+
+
 async def _ensure_scroll_into_view(locator: Locator, timeout_ms: int) -> None:
     try:
         await locator.scroll_into_view_if_needed(timeout=timeout_ms)
@@ -1186,6 +1202,48 @@ async def click_with_retry(
     return False
 
 
+def _parse_duration_label(label: str) -> Optional[int]:
+    match = DURATION_PATTERN.search(label)
+    if not match:
+        return None
+    return _duration_to_seconds(match)
+
+
+async def _read_player_timing(page: Page) -> tuple[Optional[int], Optional[float]]:
+    try:
+        payload = await page.evaluate(
+            "() => {\n"
+            "  const video = document.querySelector('video');\n"
+            "  if (!video) { return { duration: null, rate: null }; }\n"
+            "  const duration = Number.isFinite(video.duration) ? Math.round(video.duration) : null;\n"
+            "  const rate = typeof video.playbackRate === 'number' ? video.playbackRate : null;\n"
+            "  return { duration, rate };\n"
+            "}"
+        )
+    except PlaywrightError:
+        payload = None
+    duration = None
+    rate = None
+    if isinstance(payload, dict):
+        raw_duration = payload.get("duration")
+        if isinstance(raw_duration, (int, float)):
+            duration = int(raw_duration)
+        raw_rate = payload.get("rate")
+        if isinstance(raw_rate, (int, float)):
+            rate = float(raw_rate)
+    if duration is not None:
+        return duration, rate
+    try:
+        label = await page.locator("span.duration-display").first.inner_text(timeout=750)
+    except PlaywrightError:
+        label = ""
+    if label:
+        parsed = _parse_duration_label(label)
+        if parsed is not None:
+            return parsed, rate
+    return None, rate
+
+
 async def wait_for_lesson(
     candidate: LessonCandidate,
     config: RuntimeConfig,
@@ -1198,7 +1256,18 @@ async def wait_for_lesson(
         return await _solve_quiz(candidate, config, logger, stop_event, page, watchdog)
 
     base = config.after_play
-    residual = max(0, (candidate.duration_seconds or 0) - base)
+    player_duration, playback_rate = await _read_player_timing(page)
+    raw_duration = candidate.duration_seconds or player_duration or 0
+    effective_rate = playback_rate if playback_rate and playback_rate > 0 else 1.0
+    effective_duration = int(round(raw_duration / effective_rate)) if raw_duration else 0
+    if effective_duration and effective_rate != 1.0:
+        logger.info(
+            "Durata player rilevata: %ss con velocità %.2fx (attesa=%ss)",
+            raw_duration,
+            effective_rate,
+            effective_duration,
+        )
+    residual = max(0, effective_duration - base)
     planned_total = base + residual + config.buffer
     planned_total = min(planned_total, config.max_wait)
     logger.info(
@@ -1234,6 +1303,7 @@ async def wait_for_lesson(
         logger.info("Attesa interrotta per richiesta di stop")
         return False
     progress = candidate.progress or 0
+    progress_observed = candidate.progress is not None
     last_progress_change = loop.time()
     scroll_interval = max(0.0, float(config.lesson_scroll_interval))
     last_scroll = loop.time()
@@ -1257,6 +1327,8 @@ async def wait_for_lesson(
                 pass
             last_scroll = loop.time()
         if now >= deadline:
+            if not progress_observed:
+                break
             if progress >= config.progress_threshold or now >= absolute_deadline:
                 break
             remaining_estimate = _estimate_remaining_seconds(
@@ -1297,7 +1369,9 @@ async def wait_for_lesson(
                 "Progresso non disponibile per '%s', mantengo timer attuale",
                 candidate.title,
             )
+            progress_observed = False
             continue
+        progress_observed = True
         if current_progress >= config.progress_threshold:
             logger.info(
                 "Soglia completamento %s%% raggiunta per '%s'",
@@ -1313,6 +1387,7 @@ async def wait_for_lesson(
                 current_progress,
             )
             progress = current_progress
+            progress_observed = True
             remaining_estimate = _estimate_remaining_seconds(
                 candidate,
                 progress,
@@ -1335,6 +1410,9 @@ async def wait_for_lesson(
     if stop_event.is_set():
         logger.info("Attesa interrotta per richiesta di stop")
         return False
+    if await _maybe_click_navigation_buttons(page, config, logger):
+        logger.info("Navigazione completata tramite pulsanti player")
+        return True
     return progress >= config.progress_threshold
 
 
@@ -1496,87 +1574,91 @@ async def _run_course_once(
                 continue
             logger.info("Apri capitolo %s", chapter_label)
             click_desc = f"capitolo {bounds.number or bounds.index}"
-            try:
-                await bounds.click_target.evaluate(
-                    "el => {\n"
-                    "  if (!el) { return; }\n"
-                    "  el.scrollIntoView({ behavior: 'smooth', block: 'center' });\n"
-                    "  window.scrollBy(0, -120);\n"
-                    "}\n"
-                )
-                await asyncio.sleep(0.7)
-            except PlaywrightError:
-                if page is not None:
-                    try:
-                        await page.evaluate(
-                            "el => {\n"
-                            "  if (!el) { return; }\n"
-                            "  el.scrollIntoView({ behavior: 'instant', block: 'center' });\n"
-                            "  window.scrollBy(0, -120);\n"
-                            "}\n",
-                            await bounds.click_target.element_handle(),
-                        )
-                        await asyncio.sleep(0.3)
-                    except PlaywrightError:
-                        pass
-            try:
-                click_ok = await click_with_retry(
-                    bounds.click_target,
-                    config,
-                    logger,
-                    description=click_desc,
-                    page=page,
-                )
-            except CourseContextBlocked:
-                blocking_failures += 1
-                raise
-            if not click_ok:
-                blocking_failures += 1
-                fallback_title = bounds.title.split("-", 1)[-1].strip() or bounds.title.strip()
-                if fallback_title and page is not None:
-                    logger.info(
-                        "Fallback click capitolo %s usando testo '%s'",
-                        chapter_label,
-                        fallback_title,
+            already_open = await _chapter_is_expanded(bounds)
+            if not already_open:
+                try:
+                    await bounds.click_target.evaluate(
+                        "el => {\n"
+                        "  if (!el) { return; }\n"
+                        "  el.scrollIntoView({ behavior: 'smooth', block: 'center' });\n"
+                        "  window.scrollBy(0, -120);\n"
+                        "}\n"
                     )
-                    text_locator = page.locator(
-                        f"text=/{re.escape(fallback_title)}/i"
-                    ).first
-                    if await text_locator.count():
+                    await asyncio.sleep(0.7)
+                except PlaywrightError:
+                    if page is not None:
                         try:
-                            fallback_ok = await click_with_retry(
-                                text_locator,
-                                config,
-                                logger,
-                                description=f"{click_desc} fallback",
-                                page=page,
+                            await page.evaluate(
+                                "el => {\n"
+                                "  if (!el) { return; }\n"
+                                "  el.scrollIntoView({ behavior: 'instant', block: 'center' });\n"
+                                "  window.scrollBy(0, -120);\n"
+                                "}\n",
+                                await bounds.click_target.element_handle(),
                             )
-                        except CourseContextBlocked:
-                            blocking_failures += 1
-                            raise
-                        if fallback_ok:
-                            logger.info(
-                                "Click fallback capitolo %s riuscito",
-                                chapter_label,
-                            )
+                            await asyncio.sleep(0.3)
+                        except PlaywrightError:
+                            pass
+                try:
+                    click_ok = await click_with_retry(
+                        bounds.click_target,
+                        config,
+                        logger,
+                        description=click_desc,
+                        page=page,
+                    )
+                except CourseContextBlocked:
+                    blocking_failures += 1
+                    raise
+                if not click_ok:
+                    blocking_failures += 1
+                    fallback_title = bounds.title.split("-", 1)[-1].strip() or bounds.title.strip()
+                    if fallback_title and page is not None:
+                        logger.info(
+                            "Fallback click capitolo %s usando testo '%s'",
+                            chapter_label,
+                            fallback_title,
+                        )
+                        text_locator = page.locator(
+                            f"text=/{re.escape(fallback_title)}/i"
+                        ).first
+                        if await text_locator.count():
+                            try:
+                                fallback_ok = await click_with_retry(
+                                    text_locator,
+                                    config,
+                                    logger,
+                                    description=f"{click_desc} fallback",
+                                    page=page,
+                                )
+                            except CourseContextBlocked:
+                                blocking_failures += 1
+                                raise
+                            if fallback_ok:
+                                logger.info(
+                                    "Click fallback capitolo %s riuscito",
+                                    chapter_label,
+                                )
+                            else:
+                                blocking_failures += 1
+                                logger.error(
+                                    "Impossibile aprire capitolo %s anche con fallback testo",
+                                    chapter_label,
+                                )
+                                continue
                         else:
-                            blocking_failures += 1
                             logger.error(
-                                "Impossibile aprire capitolo %s anche con fallback testo",
-                                chapter_label,
+                                "Fallback testo per capitolo %s non trovato", chapter_label
                             )
                             continue
                     else:
                         logger.error(
-                            "Fallback testo per capitolo %s non trovato", chapter_label
+                            "Impossibile aprire capitolo %s: click fallito e nessun fallback",
+                            chapter_label,
                         )
                         continue
-                else:
-                    logger.error(
-                        "Impossibile aprire capitolo %s: click fallito e nessun fallback",
-                        chapter_label,
-                    )
-                    continue
+            else:
+                logger.info("Capitolo %s già aperto, evito il click", chapter_label)
             await asyncio.sleep(config.lesson_render_wait)
             await _prime_chapter_content(page, bounds, logger, config)
             bounds = await _refresh_chapter_bounds(page, bounds, logger)

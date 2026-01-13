@@ -158,6 +158,27 @@ Questa modalità è utile per tarare i selettori o verificare eventuali modifich
 
 Di seguito trovi una raccolta aggiornata dei selettori più utili per il player video, il timer e la sidebar (outline del corso). Usali come riferimento per personalizzazioni, override o script di automazione.
 
+## Script Puppeteer di esempio (filtra solo i video)
+
+Per una sequenza semplice basata sulla lista laterale del corso (solo voci con tipo **Video**), puoi usare lo script pronto in `docs/puppeteer_video_sequence.js`. Questo script:
+
+- filtra gli `<li>` dove `div.css-1rhvk9j` è esattamente `Video`,
+- legge la durata in minuti da `span.rc-A11yScreenReaderOnly`,
+- calcola l'attesa effettiva a velocità 2× (durata * 60 / 2),
+- clicca il video, attende e torna alla lista per il successivo.
+
+Avvio rapido:
+
+```bash
+node docs/puppeteer_video_sequence.js
+```
+
+Puoi cambiare URL con:
+
+```bash
+COURSE_URL="https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage" node docs/puppeteer_video_sequence.js
+```
+
 ### Selettori principali per i pulsanti del player video
 
 ```css
