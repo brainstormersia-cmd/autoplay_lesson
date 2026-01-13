@@ -514,12 +514,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> RuntimeConfig:
 def ensure_url(config: RuntimeConfig, *, prompt: bool = True) -> RuntimeConfig:
     if config.url and not config.url.lower().startswith("http"):
         raise SystemExit("Specificare un URL valido (deve iniziare con http)")
+    if config.url != DEFAULTS.url:
+        return config.with_overrides(url=DEFAULTS.url)
     if config.url == DEFAULTS.url and prompt:
-        try:
-            entered = input("Inserisci l'URL del corso: ").strip()
-        except EOFError as exc:  # pragma: no cover - interattivo
-            raise SystemExit("URL non fornito") from exc
-        if not entered:
-            raise SystemExit("URL non fornito")
-        return config.with_overrides(url=entered)
+        return config
     return config
