@@ -149,7 +149,7 @@ Con questo flusso ottieni un'installazione persistente e riavviabile automaticam
 
 ```json
 {
-  "url": "https://lms.pegaso.multiversity.click/videolezioni/0501906IUS15/",
+  "url": "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage",
   "username": "nome.cognome",
   "password": "password-super-segreta",
   "mode": "courses+quizzes",
