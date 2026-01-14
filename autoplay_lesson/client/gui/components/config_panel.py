@@ -6,6 +6,7 @@ import math
 
 import customtkinter as ctk
 
+from autoplay_lesson.config import DEFAULT_COURSE_URL
 from autoplay_lesson.client.gui import styles
 
 
@@ -80,7 +81,7 @@ class ConfigPanel(ctk.CTkFrame):
         _Field(form, text="Link del corso", row=0, column=0, columnspan=2)
         url_entry = ctk.CTkEntry(
             form,
-            placeholder_text="https://lms.pegaso...",
+            placeholder_text=DEFAULT_COURSE_URL,
             textvariable=self.url_var,
             fg_color=styles.palette.background_primary,
             border_color=styles.palette.accent_primary,
