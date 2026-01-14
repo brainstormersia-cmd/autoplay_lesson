@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover - keyring may be missing
 DURATION_PATTERN = re.compile(r"\b(?:(?P<h>\d{1,2})\s*:\s*)?(?P<m>\d{1,2})\s*:\s*(?P<s>\d{2})\b")
 
 DEFAULT_USER_DATA_DIR = Path("~/.config/autoplay-lesson/chrome-profile").expanduser()
+DEFAULT_COURSE_URL = "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
 CONFIG_DIR = Path.home() / ".autoplay_lesson"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 KEYRING_SERVICE = "autoplay_lesson"
@@ -155,7 +156,7 @@ class RuntimeConfig:
             except KeyError:
                 kwargs["course_mode"] = CourseMode.COMPLETE
         if "url" not in kwargs:
-            kwargs["url"] = "https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
+            kwargs["url"] = DEFAULT_COURSE_URL
         return cls(**kwargs)
 
     def chapter_in_scope(self, index: int, *, number: Optional[int] = None) -> bool:
@@ -172,9 +173,7 @@ class RuntimeConfig:
         return replace(self, **kwargs)
 
 
-DEFAULTS = RuntimeConfig(
-    url="https://www.coursera.org/learn/high-stakes-leadership/lecture/xKTQO/deepwater-horizon-setting-the-stage"
-)
+DEFAULTS = RuntimeConfig(url=DEFAULT_COURSE_URL)
 
 
 def _encode_password(password: str) -> str:
